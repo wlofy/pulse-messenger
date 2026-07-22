@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+websockets
+pywebpush  # web push (VAPID signing + RFC-8291 payload encryption)
+httpx  # tests only

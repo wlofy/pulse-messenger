@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#e8eefc" />
+    <title>Pulse</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232563EB'/%3E%3Cstop offset='1' stop-color='%236366F1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M9 21c4-1 3-5 5.5-5s1.5 4 4 4 2-6 4.5-6' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Work+Sans:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Liquid Glass: SVG displacement filters that make backdrop-filter actually
+         refract the content behind each surface (the "refract what's beneath it"
+         effect). Referenced from CSS via backdrop-filter: url(#…). Two strengths:
+         a gentle one for big panels, a stronger one for small floating controls. -->
+    <svg aria-hidden="true" focusable="false" width="0" height="0"
+         style="position:absolute;pointer-events:none">
+      <defs>
+        <filter id="liquid-glass" x="-35%" y="-35%" width="170%" height="170%"
+                color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.008 0.008"
+                        numOctaves="2" seed="42" result="noise" />
+          <feGaussianBlur in="noise" stdDeviation="2" result="soft" />
+          <feDisplacementMap in="SourceGraphic" in2="soft" scale="34"
+                             xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+        <filter id="liquid-glass-strong" x="-40%" y="-40%" width="180%" height="180%"
+                color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.012 0.012"
+                        numOctaves="2" seed="17" result="noise" />
+          <feGaussianBlur in="noise" stdDeviation="1.6" result="soft" />
+          <feDisplacementMap in="SourceGraphic" in2="soft" scale="60"
+                             xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </defs>
+    </svg>
+
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

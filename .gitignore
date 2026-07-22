@@ -1,0 +1,29 @@
+# --- Python virtualenv (this project lives inside one) ---
+.venv/
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
+bin/
+
+# --- Python caches ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- Databases (contain the JWT secret + VAPID private key — never commit) ---
+*.db
+
+# --- Node / frontend build ---
+node_modules/
+dist/
+
+# --- Editor / tooling ---
+.claude/
+.vscode/
+.idea/
+
+# --- Misc local artifacts ---
+encrypted.data
+.DS_Store
+GUIDE.md
