@@ -92,6 +92,26 @@ export const TrashIcon = (p) => (
   </I>
 )
 
+export const ImageIcon = (p) => (
+  <I {...p}>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <circle cx="9" cy="9" r="2" />
+    <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+  </I>
+)
+
+// "look closer at this" — the affordance for the explainability panel
+export const ScanEyeIcon = (p) => (
+  <I {...p}>
+    <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+    <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+    <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+    <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+    <circle cx="12" cy="12" r="1" />
+    <path d="M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0" />
+  </I>
+)
+
 export const XIcon = (p) => (
   <I {...p}>
     <path d="M18 6 6 18" />

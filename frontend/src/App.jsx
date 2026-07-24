@@ -3,6 +3,7 @@ import { api, connectSocket, setToken } from './api.js'
 import Auth from './Auth.jsx'
 import Avatar from './Avatar.jsx'
 import Chat from './Chat.jsx'
+import ImageViewer from './ImageViewer.jsx'
 import Notifications from './Notifications.jsx'
 import ProfilePanel from './Profile.jsx'
 import Sidebar from './Sidebar.jsx'
@@ -56,6 +57,7 @@ function ChatApp({ me, onMeChange, onLogout }) {
   const [profileView, setProfileView] = useState(null) // null | 'me' | username
   const [notifs, setNotifs] = useState([])              // notification-center history
   const [notifOpen, setNotifOpen] = useState(false)
+  const [viewing, setViewing] = useState(null)          // message whose photo is open
 
   const socketRef = useRef(null)
   const activeRef = useRef(null)
@@ -148,9 +150,12 @@ function ChatApp({ me, onMeChange, onLogout }) {
       onEvent: (ev) => {
         if (ev.type === 'message') {
           if (ev.client_id) {
-            // echo of my optimistic send: swap the pending bubble for the real thing
+            // Echo of my optimistic send: fold the real id + status onto the pending
+            // bubble rather than replacing it. Merging keeps client_id (so the React
+            // key is stable) and the local photo preview (so an image bubble doesn't
+            // blank out while the same picture is re-fetched from the server).
             const { type, ...msg } = ev
-            setMessages((ms) => ms.map((m) => (m.client_id === ev.client_id ? msg : m)))
+            setMessages((ms) => ms.map((m) => (m.client_id === ev.client_id ? { ...m, ...msg } : m)))
           } else {
             setTypingFor(ev.sender, false)
             if (activeRef.current === ev.sender) {
@@ -254,16 +259,35 @@ function ChatApp({ me, onMeChange, onLogout }) {
     return () => navigator.serviceWorker?.removeEventListener('message', onSwMessage)
   }, [openChatByName])
 
-  const sendMessage = useCallback((text) => {
+  // `photo` is a staged attachment from the composer: {dataUrl, width, height, alt}.
+  // The bubble appears immediately with the local preview; the upload happens over
+  // HTTP (megabytes don't belong on the chat socket) and only then does the message
+  // go out, carrying just the id and the description.
+  const sendMessage = useCallback(async (text, photo) => {
     const to = activeRef.current
     if (!to) return
     const client_id = crypto.randomUUID()
     setMessages((ms) => [...ms, {
       client_id, sender: me.username, recipient: to, text,
       ts: Date.now() / 1000, status: 'pending', reactions: [],
+      localUrl: photo?.dataUrl || null, alt: photo?.alt || null,
+      media_w: photo?.width, media_h: photo?.height,
     }])
-    socketRef.current?.send({ type: 'message', to, text, client_id })
-  }, [me.username])
+
+    let media_id = null
+    if (photo) {
+      try {
+        media_id = (await api.uploadMedia(photo.dataUrl, photo.width, photo.height)).id
+      } catch (e) {
+        // Leave the bubble in place marked "Not sent" — silently dropping a photo
+        // someone chose to send is the one outcome that's worse than an error.
+        setMessages((ms) => ms.map((m) => (m.client_id === client_id ? { ...m, status: 'failed' } : m)))
+        pushToast({ kind: 'message', user: { username: to }, title: 'Photo not sent', body: e.message })
+        return
+      }
+    }
+    socketRef.current?.send({ type: 'message', to, text, client_id, media_id, alt: photo?.alt || null })
+  }, [me.username, pushToast])
 
   // Freshest view of the open chat's profile (presence/avatar updates ride on chats).
   const displayUser = active
@@ -293,8 +317,17 @@ function ChatApp({ me, onMeChange, onLogout }) {
         onTyping={() => socketRef.current?.send({ type: 'typing', to: activeRef.current })}
         onReact={(message_id, emoji) => socketRef.current?.send({ type: 'reaction', message_id, emoji })}
         onOpenProfile={setProfileView}
+        onOpenImage={setViewing}
         onBack={() => { setActive(null); setActiveUser(null) }}
       />
+
+      {viewing && (
+        <ImageViewer
+          message={viewing}
+          title={viewing.sender === me.username ? 'Your photo' : `${viewing.sender}'s photo`}
+          onClose={() => setViewing(null)}
+        />
+      )}
 
       {notifOpen && (
         <Notifications

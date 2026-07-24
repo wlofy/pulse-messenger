@@ -49,10 +49,17 @@ export const api = {
   profile: (username) => authed(`/profile/${enc(username)}`),
   updateProfile: (payload) =>
     authed('/profile', { method: 'POST', body: JSON.stringify(payload) }),
+  uploadMedia: (data, width, height) =>
+    authed('/media', { method: 'POST', body: JSON.stringify({ data, width, height }) }),
   notifications: () => authed('/notifications'),
   readNotifications: () => authed('/notifications/read', { method: 'POST' }),
   clearNotifications: () => authed('/notifications/clear', { method: 'POST' }),
 }
+
+// An <img src> can't carry an Authorization header, so the token rides in the query
+// string — the same concession the WebSocket makes. Read `token` at call time, not
+// at module load: it's set after login.
+export const mediaUrl = (id) => `/media/${enc(id)}?token=${enc(token)}`
 
 // --- Web Push: register the service worker + subscribe this browser ---------
 // The VAPID key comes from the server base64url-encoded; PushManager wants raw bytes.

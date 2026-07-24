@@ -1097,6 +1097,361 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
   .notif-panel { width: 100%; max-height: 100%; height: 100%; border-radius: 0; }
 }
 
+/* ============================================================
+   Photo messages + on-device explainability
+   ============================================================ */
+.chat { position: relative; }
+.chat.dropping::after {
+  content: 'Drop a photo to attach it';
+  position: absolute;
+  inset: 12px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  border: 2px dashed var(--primary);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  font-weight: 500;
+  color: var(--primary-strong);
+}
+
+.attach-btn { flex-shrink: 0; }
+
+/* --- staged attachment, above the composer --- */
+.attach-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 16px;
+  padding: 12px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  animation: card-pop 0.28s var(--ease-spring);
+}
+.attach-thumb {
+  width: 58px;
+  height: 58px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+}
+.attach-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.attach-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.attach-alt {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 13.5px;
+}
+.attach-alt:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+.attach-note { font-size: 11.5px; color: var(--text-muted); }
+.attach-error { flex: 1; font-size: 13px; color: var(--danger); }
+
+/* --- photo bubbles ---
+   The bubble needs a DEFINITE width. Left to shrink-to-fit, a replaced <img> with
+   width:100% feeds its intrinsic pixel size (the photo's native width) into the
+   bubble's max-content sizing, and the bubble stretches to its max-width instead
+   of hugging the photo. Pinning the width makes the img's 100% resolve against it. */
+.bubble.has-photo { width: min(300px, 72vw); padding: 4px; }
+.bubble.has-photo .bubble-text { display: block; padding: 3px 7px 0; }
+.bubble.has-photo .bubble-meta {
+  display: flex;
+  justify-content: flex-end;
+  margin-left: 0;
+  top: 0;
+  padding: 3px 7px 1px;
+}
+.bubble-photo {
+  position: relative;
+  display: block;
+  width: 100%;
+  border-radius: 13px;
+  overflow: hidden;
+  line-height: 0;
+}
+.bubble-photo img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: cover;
+  background: rgba(120, 130, 180, 0.18);
+}
+.bubble-photo:disabled { cursor: default; }
+.bubble-photo:disabled img { opacity: 0.6; }
+.bubble-photo-cue {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  background: rgba(20, 26, 70, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.18s, transform 0.18s var(--ease-spring);
+}
+.bubble-photo:hover .bubble-photo-cue,
+.bubble-photo:focus-visible .bubble-photo-cue { opacity: 1; transform: none; }
+.bubble-failed { font-size: 11px; font-weight: 600; color: #ffd7d7; }
+
+/* --- the explainability viewer --- */
+.viewer {
+  position: relative;
+  width: min(1040px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 24px;
+  background: var(--bg-raised);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: card-pop 0.35s var(--ease-spring);
+}
+.viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 16px 14px 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.viewer-head h2 { flex: 1; font-size: 17px; }
+.viewer-engines {
+  display: flex;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.viewer-engine {
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+}
+.viewer-engine.on {
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+}
+.viewer-engine:disabled { opacity: 0.5; cursor: default; }
+.viewer-scrim-sub { font-size: 11.5px; opacity: 0.8; max-width: 34ch; }
+.viewer-dlbar {
+  width: 62%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.25);
+}
+.viewer-dlbar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #fff;
+  transition: width 0.2s;
+}
+.viewer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(300px, 0.9fr);
+  gap: 16px;
+  padding: 16px 20px 20px;
+  overflow-y: auto;
+}
+.viewer-frame {
+  position: relative;
+  align-self: start;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: rgba(20, 26, 70, 0.35);
+  line-height: 0;
+}
+.viewer-frame img { display: block; width: 100%; height: auto; }
+.viewer-layer { position: absolute; inset: 0; width: 100%; height: 100%; }
+.viewer-scrim {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 20px;
+  text-align: center;
+  line-height: 1.5;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(20, 26, 70, 0.62);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.scanner {
+  width: 58%;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.25);
+}
+.scanner i {
+  display: block;
+  height: 100%;
+  width: 36%;
+  border-radius: 999px;
+  background: #fff;
+  animation: scan 1.05s infinite ease-in-out;
+}
+@keyframes scan {
+  from { transform: translateX(-105%); }
+  to { transform: translateX(310%); }
+}
+
+.viewer-panel { min-width: 0; font-size: 13.5px; }
+.viewer-status { font-size: 11.5px; color: var(--text-muted); margin-bottom: 10px; }
+.viewer-error { font-size: 13px; color: var(--danger); }
+.viewer-narration p { margin: 0 0 8px; }
+.viewer-narration h3 {
+  display: inline-block;
+  margin: 16px 0 8px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+}
+.viewer-narration h3:first-child { margin-top: 0; }
+.vision-caveat {
+  margin-top: 14px;
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.viewer-hint { margin: 18px 0 8px; font-size: 12px; color: var(--text-muted); }
+.viewer-det {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px 7px 12px;
+  margin-bottom: 6px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  transition: background 0.15s;
+}
+.viewer-det:hover { background: var(--bg-hover); }
+.viewer-det > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.viewer-swatch {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+}
+.viewer-explain {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  transition: transform 0.15s var(--ease-spring), opacity 0.15s;
+}
+.viewer-explain:hover:not(:disabled) { transform: scale(1.05); }
+.viewer-explain:disabled { opacity: 0.4; cursor: default; }
+.viewer-more { margin-top: 8px; font-size: 11.5px; color: var(--text-muted); }
+
+.viewer-progress, .viewer-heat {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.viewer-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.viewer-bar {
+  height: 7px;
+  margin-top: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(120, 130, 180, 0.22);
+}
+.viewer-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  transition: width 0.18s;
+}
+.viewer-cancel {
+  margin-top: 10px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+}
+.viewer-cancel:hover { background: var(--bg-hover); color: var(--text); }
+.viewer-heat p { font-size: 12.5px; line-height: 1.55; }
+
+@media (max-width: 900px) {
+  .viewer-body { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .overlay { padding: 0; }
+  .viewer { width: 100%; max-height: 100%; height: 100%; border-radius: 0; }
+  /* touch has no hover, so the affordance has to stay visible */
+  .bubble-photo-cue { opacity: 1; transform: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

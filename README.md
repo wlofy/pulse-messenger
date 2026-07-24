@@ -10,6 +10,16 @@ from heavy frameworks.
 - **Real-time messaging** over a single WebSocket per session (auto-reconnect with backoff)
 - **Delivery + read receipts**, typing indicators, and live online/offline presence
 - **Message reactions** (emoji, toggle on/off)
+- **Photo messages with on-device vision** — attach, paste or drop an image and an
+  object detector runs *in your browser* to write a description of it. That description
+  becomes the image's `alt` text, the notification body and the sidebar preview; it's
+  shown in an editable field before sending, never attached silently. Tap any photo to
+  open the **explainability panel**: detection boxes, a plain-language reading of the
+  scene, and occlusion heatmaps showing which pixels a given detection actually depends
+  on. Two detectors behind one interface — **COCO-SSD** (fast, ~6 MB) and **DETR
+  ResNet-50** (more accurate, ~79 MB, WebGPU-accelerated), switchable in the panel.
+  No image is ever sent to a model service — inference happens on the sender's and
+  viewer's own hardware.
 - **Auth** — scrypt-hashed passwords (stdlib `hashlib`) and hand-rolled **HS256 JWTs**
   (stdlib `hmac`), with a revocation denylist so logout actually works on stateless tokens
 - **Notifications**
@@ -28,6 +38,7 @@ from heavy frameworks.
 | Backend | FastAPI, `sqlite3` (stdlib), WebSockets, `pywebpush` |
 | Frontend | React 19, Vite |
 | Auth | scrypt (hashlib) + HS256 JWT (hmac) |
+| Vision | TensorFlow.js + COCO-SSD and transformers.js + DETR ResNet-50, both lazy-loaded in the browser (nothing in the boot bundle) |
 
 ## Running it
 
@@ -59,6 +70,15 @@ Each test spins up a real uvicorn server on its own database:
 ```bash
 .venv/Scripts/python.exe app/test_chat.py
 .venv/Scripts/python.exe app/test_ratelimit.py
+.venv/Scripts/python.exe app/test_media.py
+```
+
+The scene-reasoning engine is pure (boxes in, sentences out), so it needs no model
+and no test runner — open the app at `/?selftest` and read the browser console, or
+run it headless:
+
+```bash
+cd frontend && node -e "import('./src/vision.js').then(m => m.runSelfTest())"
 ```
 
 ## Notes on Web Push

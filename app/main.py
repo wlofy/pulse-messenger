@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS push_subs(
    sub_json TEXT NOT NULL,      -- full PushSubscription, fed straight to pywebpush
    PRIMARY KEY (username, endpoint)
 );
+CREATE TABLE IF NOT EXISTS media(
+   id TEXT PRIMARY KEY,         -- random urlsafe token, NOT a sequential int (see /media/{id})
+   owner TEXT NOT NULL,         -- who uploaded it
+   mime TEXT NOT NULL,
+   width INTEGER NOT NULL,      -- natural pixels, so the bubble can reserve space pre-load
+   height INTEGER NOT NULL,
+   bytes BLOB NOT NULL,
+   ts REAL NOT NULL
+);
 """)
 # repair a `reactions` table left by an earlier broken draft: CREATE TABLE IF NOT
 # EXISTS never fixes an existing table, so a malformed one persists silently. It
@@ -83,6 +92,17 @@ for col in ("avatar", "name", "bio", "password"):
         db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
     except sqlite3.OperationalError:
         pass
+# Photo messages, added the same nullable way so existing rows stay valid:
+#   media_id -> a row in `media`; NULL means this is a plain text message
+#   alt      -> machine-generated scene description, kept SEPARATE from `text` so a
+#               caption the user typed is never confused with what the detector guessed
+for col in ("media_id", "alt"):
+    try:
+        db.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
+    except sqlite3.OperationalError:
+        pass
+# created after the ALTER, not in the script above — the column may not exist yet
+db.execute("CREATE INDEX IF NOT EXISTS idx_msg_media ON messages(media_id)")
 db.commit()
 
 
@@ -275,6 +295,8 @@ login_limit = rate_limit(5, 60, "login")
 signup_limit = rate_limit(5, 60, "signup")
 exists_limit = rate_limit(60, 60, "exists")
 api_limit = rate_limit(300, 60, "api", by="token")
+# uploads are megabytes each and hit the db hard — far tighter than the read-mostly api
+upload_limit = rate_limit(20, 60, "media", by="token")
 
 def profile_row(username : str):
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -385,6 +407,75 @@ def push_unsubscribe(sub: PushSubscription, me: str = Depends(current_user)):
     return {"ok": True}
 
 
+# --- Photo messages ---------------------------------------------------------
+# Photos live in their own table and are fetched by URL, NOT inlined into the
+# message row the way avatars are. /messages returns an ENTIRE conversation with
+# no server-side pagination, so a base64 photo in `text` would be re-downloaded,
+# in full, every time that chat is opened.
+MAX_MEDIA_BYTES = 4 * 1024 * 1024
+ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
+class MediaUpload(BaseModel):
+    data: str            # a data URL: "data:image/jpeg;base64,…"
+    width: int           # natural pixels; sent so the bubble can reserve space pre-load
+    height: int
+
+
+def preview(text: str, media_id: str | None, alt: str | None) -> str:
+    """One-line summary of a message for the sidebar, toasts and push bodies.
+    A photo falls back to its machine description, which is exactly what that
+    description is for — a text channel can't show the picture."""
+    if not media_id:
+        return text
+    return f"📷 {text or alt or 'Photo'}"
+
+
+@app.post("/media", dependencies=[Depends(upload_limit)])
+def upload_media(body: MediaUpload, me: str = Depends(current_user)):
+    header, _, payload = body.data.partition(",")
+    mime = header.removeprefix("data:").removesuffix(";base64")
+    if not header.endswith(";base64") or mime not in ALLOWED_MIME:
+        raise HTTPException(400, "expected a base64 data URL of a jpeg, png, webp or gif")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except ValueError:      # binascii.Error subclasses it
+        raise HTTPException(400, "malformed base64")
+    if not raw:
+        raise HTTPException(400, "empty image")
+    if len(raw) > MAX_MEDIA_BYTES:
+        raise HTTPException(413, "image too large")
+    if not (0 < body.width <= 20_000 and 0 < body.height <= 20_000):
+        raise HTTPException(400, "implausible image dimensions")
+    media_id = secrets.token_urlsafe(18)
+    db.execute("INSERT INTO media(id, owner, mime, width, height, bytes, ts) VALUES (?,?,?,?,?,?,?)",
+               (media_id, me, mime, body.width, body.height, raw, time.time()))
+    db.commit()
+    return {"id": media_id, "width": body.width, "height": body.height}
+
+
+@app.get("/media/{media_id}")
+def get_media(media_id: str, token: str = "", authorization: str = Header(default="")):
+    """Serve the bytes. An <img src> can't set an Authorization header, so the token
+    may ride in the query string — the same concession /ws makes, and the ids are
+    unguessable regardless. Readable only by the uploader and by anyone the photo was
+    actually sent to; a stranger gets 404 rather than 403, which would confirm it exists."""
+    me = user_for_token(token) or user_for_token(authorization.removeprefix("Bearer ").strip())
+    if not me:
+        raise HTTPException(401, "not logged in")
+    row = db.execute("SELECT owner, mime, bytes FROM media WHERE id = ?", (media_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "no such image")
+    if row["owner"] != me and not db.execute(
+        "SELECT 1 FROM messages WHERE media_id = ? AND (sender = ? OR recipient = ?)",
+        (media_id, me, me),
+    ).fetchone():
+        raise HTTPException(404, "no such image")
+    # ids are unique per upload and the bytes never change, so this can cache forever
+    return Response(row["bytes"], media_type=row["mime"],
+                    headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
 @app.get("/users", dependencies=[Depends(api_limit)])
 def users(q: str = "", me: str = Depends(current_user)):
     rows = db.execute(
@@ -409,11 +500,15 @@ def users(q: str = "", me: str = Depends(current_user)):
 
 @app.get("/messages", dependencies=[Depends(api_limit)])
 def messages(other: str, me: str = Depends(current_user)):
+    # LEFT JOIN rather than copying the size onto the message row: the bubble needs
+    # the photo's aspect ratio to reserve space *before* it loads, or every image
+    # message shoves the conversation around as it arrives.
     rows = db.execute(
         """
-        SELECT * FROM messages
-        WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
-        ORDER BY id
+        SELECT m.*, md.width AS media_w, md.height AS media_h
+        FROM messages m LEFT JOIN media md ON md.id = m.media_id
+        WHERE (m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)
+        ORDER BY m.id
         """,
         (me, other, other, me),
     ).fetchall()
@@ -468,7 +563,9 @@ def chats(me: str = Depends(current_user)):
         out.append({
             "username": p, "avatar": user["avatar"] if user else None,
             "name": user["name"] if user else None, "online": p in online,
-            "unread": unread, "last_text": last["text"], "last_ts": last["ts"],
+            "unread": unread,
+            "last_text": preview(last["text"], last["media_id"], last["alt"]),
+            "last_ts": last["ts"],
             "last_sender": last["sender"], "last_status": last["status"],
         })
     out.sort(key=lambda c: c["last_ts"], reverse=True)
@@ -485,9 +582,12 @@ def get_profile(username: str, me: str = Depends(current_user)):
 # --- the wire protocol -------------------------------------------------
 #
 # client -> server                      server -> client
-# {"type":"message","to","text"}        {"type":"message", id, sender,
-#                                        recipient, text, ts, status}
+# {"type":"message","to","text",         {"type":"message", id, sender, recipient,
+#  "media_id"?,"alt"?}                    text, ts, status, media_id, alt}
 #                                       (echo of your own send, same shape)
+#
+# `media_id` references a row uploaded via POST /media; `alt` is the sender's
+# locally-computed scene description for it. The bytes never cross this socket.
 #                                       {"type":"delivered","by":user}
 #                                       (bulk: everything I sent them landed)
 # {"type":"read","from":user}           {"type":"read","by":user}
@@ -565,19 +665,36 @@ async def chat_ws(ws: WebSocket, token: str = ""):
             event = await ws.receive_json()
 
             if event.get("type") == "message":
-                to, text = event["to"], event["text"]
+                to, text = event["to"], event.get("text") or ""
+                media_id, alt = event.get("media_id"), (event.get("alt") or None)
+                media_w = media_h = None
+                if media_id:
+                    # you may only attach your OWN upload — otherwise anyone who saw an
+                    # id could re-send someone else's photo under their own name
+                    m = db.execute("SELECT width, height FROM media WHERE id = ? AND owner = ?",
+                                   (media_id, username)).fetchone()
+                    if not m:
+                        continue
+                    media_w, media_h = m["width"], m["height"]
+                    if alt:
+                        alt = alt[:500]
+                elif not text.strip():
+                    continue          # a message with neither text nor a photo isn't one
                 status = "delivered" if to in online else "sent"
                 ts = time.time()
                 cur = db.execute(
-                    "INSERT INTO messages(sender, recipient, text, ts, status) VALUES(?,?,?,?,?)",
-                    (username, to, text, ts, status),
+                    "INSERT INTO messages(sender, recipient, text, ts, status, media_id, alt)"
+                    " VALUES(?,?,?,?,?,?,?)",
+                    (username, to, text, ts, status, media_id, alt),
                 )
                 db.commit()
                 out = {"type": "message", "id": cur.lastrowid, "sender": username,
                        "recipient": to, "text": text, "ts": ts, "status": status,
-                       "reactions": []}
+                       "media_id": media_id, "alt": alt,
+                       "media_w": media_w, "media_h": media_h, "reactions": []}
                 await push(to, out)
-                await notify(to, "message", username, text)  # feed the recipient's pane
+                # feed the recipient's pane — a photo shows up as its description
+                await notify(to, "message", username, preview(text, media_id, alt))
                 # echo carries the real id + status; client_id reconciles the optimistic bubble
                 await ws.send_json({**out, "client_id": event.get("client_id")})
 
@@ -597,7 +714,8 @@ async def chat_ws(ws: WebSocket, token: str = ""):
 
             elif event.get("type") == "reaction":
                 mid, emoji = event["message_id"], event["emoji"]
-                msg = db.execute("SELECT sender, recipient, text FROM messages WHERE id = ?", (mid,)).fetchone()
+                msg = db.execute("SELECT sender, recipient, text, media_id, alt FROM messages WHERE id = ?",
+                                 (mid,)).fetchone()
                 if not msg or username not in (msg["sender"], msg["recipient"]):
                     continue  # only participants may react
                 existing = db.execute(
@@ -608,8 +726,9 @@ async def chat_ws(ws: WebSocket, token: str = ""):
                 else:                                # new or switched emoji
                     db.execute("INSERT OR REPLACE INTO reactions VALUES (?,?,?)", (mid, username, emoji))
                 db.commit()
+                shown = preview(msg["text"], msg["media_id"], msg["alt"])
                 out = {"type": "reaction", "message_id": mid, "emoji": emoji, "by": username,
-                       "removed": removed, "message_text": msg["text"],
+                       "removed": removed, "message_text": shown,
                        "message_sender": msg["sender"], "message_recipient": msg["recipient"]}
                 await push(msg["sender"], out)
                 if msg["recipient"] != msg["sender"]:
@@ -617,7 +736,7 @@ async def chat_ws(ws: WebSocket, token: str = ""):
                 # only the message's owner cares that someone reacted, and only when
                 # a reaction is added (not toggled off) by somebody other than them
                 if not removed and username != msg["sender"]:
-                    await notify(msg["sender"], "reaction", username, f'{emoji} to "{msg["text"]}"')
+                    await notify(msg["sender"], "reaction", username, f'{emoji} to "{shown}"')
     except WebSocketDisconnect:
         pass
     finally:

@@ -11,6 +11,7 @@ export default defineConfig({
       '/users': backend,
       '/chats': backend,
       '/messages': backend,
+      '/media': backend,
       '/notifications': backend,
       '/push': backend,
       '/ws': { target: 'ws://localhost:8000', ws: true },
