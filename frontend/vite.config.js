@@ -13,6 +13,8 @@ export default defineConfig({
       '/messages': backend,
       '/media': backend,
       '/notifications': backend,
+      '/events': backend,
+      '/assistant': backend,
       '/push': backend,
       '/ws': { target: 'ws://localhost:8000', ws: true },
     },

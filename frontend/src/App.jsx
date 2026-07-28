@@ -1,14 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, connectSocket, setToken } from './api.js'
+import Assistant from './Assistant.jsx'
 import Auth from './Auth.jsx'
 import Avatar from './Avatar.jsx'
 import Chat from './Chat.jsx'
+import Events from './Events.jsx'
 import ImageViewer from './ImageViewer.jsx'
 import Notifications from './Notifications.jsx'
 import ProfilePanel from './Profile.jsx'
 import Sidebar from './Sidebar.jsx'
 
 export default function App() {
+  // Theme is a property of the DEVICE, not the session, so it lives in localStorage
+  // (unlike `pulse:me`) and is shared by every tab. First visit follows the OS.
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pulse:theme')
+      if (saved === 'dark' || saved === 'light') return saved
+    } catch { /* storage blocked */ }
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem('pulse:theme', theme) } catch { /* storage blocked */ }
+  }, [theme])
+  const toggleTheme = useCallback(() => setTheme((t) => (t === 'dark' ? 'light' : 'dark')), [])
+
   // sessionStorage (not local) so each browser tab can be a different user — handy
   // for trying the realtime features alone with two tabs side by side
   const [me, setMe] = useState(() => {
@@ -31,6 +48,8 @@ export default function App() {
   return (
     <ChatApp
       me={me}
+      theme={theme}
+      onToggleTheme={toggleTheme}
       onMeChange={(user) => {
         // profile responses carry no token — keep the one we have
         const merged = { ...me, ...user }
@@ -46,7 +65,7 @@ export default function App() {
   )
 }
 
-function ChatApp({ me, onMeChange, onLogout }) {
+function ChatApp({ me, theme, onToggleTheme, onMeChange, onLogout }) {
   const [chats, setChats] = useState([])
   const [active, setActive] = useState(null)        // username of the open chat
   const [activeUser, setActiveUser] = useState(null) // their profile (works pre-history too)
@@ -57,6 +76,7 @@ function ChatApp({ me, onMeChange, onLogout }) {
   const [profileView, setProfileView] = useState(null) // null | 'me' | username
   const [notifs, setNotifs] = useState([])              // notification-center history
   const [notifOpen, setNotifOpen] = useState(false)
+  const [eventsOpen, setEventsOpen] = useState(false)
   const [viewing, setViewing] = useState(null)          // message whose photo is open
 
   const socketRef = useRef(null)
@@ -306,6 +326,9 @@ function ChatApp({ me, onMeChange, onLogout }) {
         onOpen={openChat}
         onOpenProfile={setProfileView}
         onOpenNotifications={openNotifications}
+        onOpenEvents={() => setEventsOpen(true)}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
         onLogout={onLogout}
       />
       <Chat
@@ -328,6 +351,10 @@ function ChatApp({ me, onMeChange, onLogout }) {
           onClose={() => setViewing(null)}
         />
       )}
+
+      {eventsOpen && <Events me={me} onClose={() => setEventsOpen(false)} />}
+
+      <Assistant />
 
       {notifOpen && (
         <Notifications

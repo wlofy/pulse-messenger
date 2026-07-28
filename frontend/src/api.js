@@ -54,6 +54,13 @@ export const api = {
   notifications: () => authed('/notifications'),
   readNotifications: () => authed('/notifications/read', { method: 'POST' }),
   clearNotifications: () => authed('/notifications/clear', { method: 'POST' }),
+  events: () => authed('/events'),
+  createEvent: (title, event_date, invitees) =>
+    authed('/events', { method: 'POST', body: JSON.stringify({ title, event_date, invitees }) }),
+  rsvp: (id, status) =>
+    authed(`/events/${id}/rsvp`, { method: 'POST', body: JSON.stringify({ status }) }),
+  // one model turn — seconds, not milliseconds; callers must show a pending state
+  ask: (q) => authed('/assistant', { method: 'POST', body: JSON.stringify({ q }) }),
 }
 
 // An <img src> can't carry an Authorization header, so the token rides in the query

@@ -119,6 +119,52 @@ export const XIcon = (p) => (
   </I>
 )
 
+export const SunIcon = (p) => (
+  <I {...p}>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2" /><path d="M12 20v2" />
+    <path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" />
+    <path d="M2 12h2" /><path d="M20 12h2" />
+    <path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" />
+  </I>
+)
+
+export const MoonIcon = (p) => (
+  <I {...p}>
+    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+  </I>
+)
+
+export const CalendarIcon = (p) => (
+  <I {...p}>
+    <path d="M8 2v4" />
+    <path d="M16 2v4" />
+    <rect width="18" height="18" x="3" y="4" rx="2" />
+    <path d="M3 10h18" />
+  </I>
+)
+
+export const SparklesIcon = (p) => (
+  <I {...p}>
+    <path d="M9.9 2.6 8.5 6.5 4.6 7.9l3.9 1.4 1.4 3.9 1.4-3.9 3.9-1.4-3.9-1.4Z" />
+    <path d="m18 9-.8 2.2-2.2.8 2.2.8.8 2.2.8-2.2 2.2-.8-2.2-.8Z" />
+    <path d="m14.5 16.5-.6 1.6-1.6.6 1.6.6.6 1.6.6-1.6 1.6-.6-1.6-.6Z" />
+  </I>
+)
+
+export const CheckIcon = (p) => (
+  <I {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </I>
+)
+
+export const PlusIcon = (p) => (
+  <I {...p}>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </I>
+)
+
 // Message status ticks. Both checks are always in the DOM; CSS slides the second
 // one in on `delivered` and recolors on `read`, so status changes animate smoothly.
 export function Ticks({ status }) {
