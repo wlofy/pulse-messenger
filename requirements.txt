@@ -2,4 +2,5 @@ fastapi
 uvicorn
 websockets
 pywebpush  # web push (VAPID signing + RFC-8291 payload encryption)
+claude-agent-sdk  # /assistant — drives the local Claude Code CLI, no API key involved
 httpx  # tests only

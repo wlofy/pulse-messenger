@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
-import { BellIcon, LogOutIcon, MessageIcon, SearchIcon, Ticks, XIcon } from './icons.jsx'
+import {
+  BellIcon, CalendarIcon, LogOutIcon, MessageIcon, MoonIcon, SearchIcon, SunIcon, Ticks, XIcon,
+} from './icons.jsx'
 
 function timeLabel(ts) {
   const d = new Date(ts * 1000)
@@ -14,7 +16,8 @@ function timeLabel(ts) {
 }
 
 export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNotifs,
-                                  onOpen, onOpenProfile, onOpenNotifications, onLogout }) {
+                                  onOpen, onOpenProfile, onOpenNotifications, onOpenEvents,
+                                  theme, onToggleTheme, onLogout }) {
   const [q, setQ] = useState('')
   const [found, setFound] = useState([])
 
@@ -55,6 +58,9 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
             {wsStatus === 'connected' ? 'online' : 'reconnecting…'}
           </span>
         </div>
+        <button className="icon-btn" title="Events" aria-label="Events" onClick={onOpenEvents}>
+          <CalendarIcon size={18} />
+        </button>
         <button
           className="icon-btn notif-btn"
           title="Notifications"
@@ -65,6 +71,15 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
           {unreadNotifs > 0 && (
             <span className="notif-badge" key={unreadNotifs}>{unreadNotifs > 9 ? '9+' : unreadNotifs}</span>
           )}
+        </button>
+        <button
+          className="icon-btn theme-btn"
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          aria-pressed={theme === 'dark'}
+          onClick={onToggleTheme}
+        >
+          {theme === 'dark' ? <SunIcon size={18} /> : <MoonIcon size={18} />}
         </button>
         <button className="icon-btn" title="Log out" aria-label="Log out" onClick={onLogout}>
           <LogOutIcon size={18} />

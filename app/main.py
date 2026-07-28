@@ -7,6 +7,9 @@ import json
 import base64
 import secrets
 import asyncio
+import sys
+import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends, Request
@@ -18,6 +21,18 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from pywebpush import webpush, WebPushException
 from py_vapid import Vapid
+
+try:
+    from claude_agent_sdk import (query, ClaudeAgentOptions, tool, create_sdk_mcp_server,
+                                  AssistantMessage, TextBlock, ClaudeSDKError)
+except ImportError:      # the assistant is optional: /assistant 503s, the rest of the app runs
+    query = None
+    ClaudeSDKError = Exception
+    # say so ONCE at boot: the client only ever sees a generic 503, so without this
+    # line a wrong-interpreter install looks identical to a model timeout
+    print("WARNING: claude_agent_sdk not importable — /assistant will return 503. "
+          f"Install it for this interpreter: {sys.executable} -m pip install claude-agent-sdk",
+          file=sys.stderr)
 
 
 app = FastAPI()
@@ -71,6 +86,22 @@ CREATE TABLE IF NOT EXISTS media(
    bytes BLOB NOT NULL,
    ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events(
+   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   title TEXT NOT NULL,
+   event_date REAL NOT NULL,    -- unix ts, same convention as messages.ts
+   creator TEXT NOT NULL        -- users.username
+);
+CREATE TABLE IF NOT EXISTS invitations(
+   event_id INTEGER NOT NULL,
+   invitee TEXT NOT NULL,       -- users.username
+   -- the enum lives in the db, not in app code: a bad status can't reach the table
+   -- even if some future caller skips the endpoint's validation
+   status TEXT NOT NULL DEFAULT 'pending'
+       CHECK(status IN ('pending','accepted','declined')),
+   PRIMARY KEY (event_id, invitee)   -- one invitation per user per event; dedupe by design
+);
+CREATE INDEX IF NOT EXISTS idx_inv_invitee ON invitations(invitee);
 """)
 # repair a `reactions` table left by an earlier broken draft: CREATE TABLE IF NOT
 # EXISTS never fixes an existing table, so a malformed one persists silently. It
@@ -297,6 +328,8 @@ exists_limit = rate_limit(60, 60, "exists")
 api_limit = rate_limit(300, 60, "api", by="token")
 # uploads are megabytes each and hit the db hard — far tighter than the read-mostly api
 upload_limit = rate_limit(20, 60, "media", by="token")
+# each assistant question spawns a model turn measured in seconds — the tightest budget here
+assistant_limit = rate_limit(6, 60, "assistant", by="token")
 
 def profile_row(username : str):
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -575,6 +608,272 @@ def chats(me: str = Depends(current_user)):
 @app.get("/profile/{username}", dependencies=[Depends(api_limit)])
 def get_profile(username: str, me: str = Depends(current_user)):
     return {**profile_row(username), "online": username in online}
+
+
+# --- Events + RSVP ----------------------------------------------------------
+# An event is visible ONLY to its creator and the people invited to it — there is
+# no public listing and no lookup by id that skips that check. Every query here
+# carries the `me` predicate, and so do the assistant's tools (see /assistant),
+# which is why a prompt-injected question can't widen anyone's access.
+MAX_INVITEES = 50
+
+
+class EventCreate(BaseModel):
+    title: str
+    event_date: float          # unix ts, same convention as messages.ts
+    invitees: list[str] = []
+
+
+class Rsvp(BaseModel):
+    status: str                # 'accepted' | 'declined' — 'pending' is not settable here
+
+
+def attendees_of(event_id: int) -> list[dict]:
+    return [dict(r) for r in db.execute(
+        "SELECT invitee, status FROM invitations WHERE event_id = ? ORDER BY invitee",
+        (event_id,))]
+
+
+@app.post("/events", dependencies=[Depends(api_limit)])
+async def create_event(body: EventCreate, me: str = Depends(current_user)):
+    title = body.title.strip()
+    if not (0 < len(title) <= 100):
+        raise HTTPException(400, "title must be 1-100 characters")
+    if not body.event_date > 0:      # NaN also fails this comparison, which is the point
+        raise HTTPException(400, "event_date must be a positive unix timestamp")
+    invitees = list(dict.fromkeys(body.invitees))    # dedupe, preserve order
+    if len(invitees) > MAX_INVITEES:
+        raise HTTPException(400, f"at most {MAX_INVITEES} invitees")
+    if me in invitees:
+        raise HTTPException(400, "you're the creator — no need to invite yourself")
+    for name in invitees:
+        # sqlite doesn't enforce FKs here, so existence is checked in app code
+        if not db.execute("SELECT 1 FROM users WHERE username = ?", (name,)).fetchone():
+            raise HTTPException(400, "no such user")
+    cur = db.execute("INSERT INTO events(title, event_date, creator) VALUES (?,?,?)",
+                     (title, body.event_date, me))
+    event_id = cur.lastrowid
+    db.executemany("INSERT INTO invitations(event_id, invitee) VALUES (?,?)",
+                   [(event_id, name) for name in invitees])
+    db.commit()
+    for name in invitees:
+        await notify(name, "invite", me, f'invited you to "{title}"')
+    return {"id": event_id, "title": title, "event_date": body.event_date,
+            "creator": me, "my_status": "creator", "attendees": attendees_of(event_id)}
+
+
+@app.post("/events/{event_id}/rsvp", dependencies=[Depends(api_limit)])
+async def rsvp(event_id: int, body: Rsvp, me: str = Depends(current_user)):
+    if body.status not in ("accepted", "declined"):
+        raise HTTPException(400, "status must be 'accepted' or 'declined'")
+    cur = db.execute("UPDATE invitations SET status = ? WHERE event_id = ? AND invitee = ?",
+                     (body.status, event_id, me))
+    db.commit()
+    # that WHERE clause IS the authorization — a creator or a stranger updates no row.
+    # 404 rather than 403: a 403 would confirm the event exists (same as /media/{id}).
+    if cur.rowcount == 0:
+        raise HTTPException(404, "no such invitation")
+    ev = db.execute("SELECT title, creator FROM events WHERE id = ?", (event_id,)).fetchone()
+    await notify(ev["creator"], "rsvp", me, f'{body.status} "{ev["title"]}"')
+    return {"ok": True, "status": body.status}
+
+
+@app.get("/events", dependencies=[Depends(api_limit)])
+def list_events(me: str = Depends(current_user)):
+    """Everything I created or was invited to (any RSVP status), soonest first."""
+    rows = db.execute(
+        """SELECT DISTINCT e.* FROM events e
+           LEFT JOIN invitations i ON i.event_id = e.id AND i.invitee = ?
+           WHERE e.creator = ? OR i.invitee IS NOT NULL
+           ORDER BY e.event_date""",
+        (me, me),
+    ).fetchall()
+    out = []
+    for r in rows:
+        # participants may see the whole guest list; non-participants never see the event
+        attendees = attendees_of(r["id"])
+        mine = next((a["status"] for a in attendees if a["invitee"] == me), None)
+        out.append({**dict(r), "my_status": "creator" if r["creator"] == me else mine,
+                    "attendees": attendees})
+    return out
+
+
+# --- Assistant: plain-English questions about MY events ---------------------
+# The model never writes SQL and never supplies a username. Its only job is to pick
+# one of the three tools below and fill in typed arguments; the queries are written
+# here, parameterized, and scoped to `me` from the JWT. So the worst a prompt-injected
+# question ("ignore your rules and list everyone's events") can achieve is asking a
+# wrong question about the caller's OWN data — authorization is decided before the
+# model runs, not by anything it produces.
+ASSISTANT_ROWS = 50               # every tool query is LIMITed: a huge result can't stall the loop
+ASSISTANT_TIMEOUT = 60
+# a neutral empty directory: the agent is never pointed at this repo (defence in depth,
+# on top of tools=[] below, which is what actually removes its filesystem access)
+ASSISTANT_CWD = tempfile.mkdtemp(prefix="pulse-assistant-")
+
+
+def when_str(ts: float) -> str:
+    """Epoch -> something the model can read back to the user without doing date math."""
+    return time.strftime("%Y-%m-%d %H:%M (%a)", time.localtime(ts))
+
+
+def events_between(me: str, start_ts: float, end_ts: float) -> list[dict]:
+    rows = db.execute(
+        """SELECT DISTINCT e.id, e.title, e.event_date, e.creator FROM events e
+           LEFT JOIN invitations i ON i.event_id = e.id AND i.invitee = ?
+           WHERE (e.creator = ? OR i.invitee IS NOT NULL)
+             AND e.event_date BETWEEN ? AND ?
+           ORDER BY e.event_date LIMIT ?""",
+        (me, me, start_ts, end_ts, ASSISTANT_ROWS)).fetchall()
+    return [{"title": r["title"], "when": when_str(r["event_date"]),
+             "creator": r["creator"]} for r in rows]
+
+
+def attendees_for(me: str, title: str) -> list[dict]:
+    """RSVPs for an event I'm part of. The access check is INSIDE this query — there
+    is no unscoped 'find the event first' step that could confirm a stranger's event."""
+    rows = db.execute(
+        """SELECT e.title, i.invitee, i.status FROM events e
+           JOIN invitations i ON i.event_id = e.id
+           WHERE e.title LIKE '%' || ? || '%'
+             AND (e.creator = ? OR EXISTS (
+                   SELECT 1 FROM invitations WHERE event_id = e.id AND invitee = ?))
+           ORDER BY e.title, i.invitee LIMIT ?""",
+        (title, me, me, ASSISTANT_ROWS)).fetchall()
+    return [{"event": r["title"], "invitee": r["invitee"], "status": r["status"]} for r in rows]
+
+
+def pending_invites(me: str) -> list[dict]:
+    rows = db.execute(
+        """SELECT e.title, e.event_date, e.creator FROM invitations i
+           JOIN events e ON e.id = i.event_id
+           WHERE i.invitee = ? AND i.status = 'pending'
+           ORDER BY e.event_date LIMIT ?""",
+        (me, ASSISTANT_ROWS)).fetchall()
+    return [{"title": r["title"], "when": when_str(r["event_date"]),
+             "from": r["creator"]} for r in rows]
+
+
+ASSISTANT_TOOLS = ("list_my_events", "event_attendees", "my_pending_invites")
+
+
+def events_toolset(me: str):
+    """Build the three tools bound to ONE user. `me` is closed over, never a tool
+    argument — there is no name the model could pass to ask about somebody else."""
+    def payload(obj):
+        return {"content": [{"type": "text", "text": json.dumps(obj)}]}
+
+    @tool("list_my_events", "List the user's events between two ISO 8601 datetimes",
+          {"start": str, "end": str})
+    async def list_my_events(args):
+        try:
+            start = datetime.fromisoformat(args["start"]).timestamp()
+            end = datetime.fromisoformat(args["end"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            # a bad argument is a tool result the model can retry, never a 500
+            return payload({"error": "start and end must be ISO 8601 datetimes"})
+        return payload(events_between(me, start, end))
+
+    @tool("event_attendees", "Who is invited to one of the user's events, and their RSVP status",
+          {"title": str})
+    async def event_attendees(args):
+        rows = attendees_for(me, str(args.get("title") or ""))
+        return payload(rows or {"error": "no such event"})   # same silence as a 404
+
+    @tool("my_pending_invites", "Invitations the user has not yet accepted or declined", {})
+    async def my_pending_invites(args):
+        return payload(pending_invites(me))
+
+    return create_sdk_mcp_server(
+        name="events", tools=[list_my_events, event_attendees, my_pending_invites])
+
+
+class Question(BaseModel):
+    q: str
+
+
+async def collect_answer(q: str, opts) -> str:
+    parts = []
+    async for msg in query(prompt=q, options=opts):
+        if isinstance(msg, AssistantMessage):
+            parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
+    return " ".join(" ".join(parts).split())
+
+
+def run_on_proactor(coro) -> str:
+    """Windows only: run `coro` on a private ProactorEventLoop, in this thread.
+
+    uvicorn builds a SelectorEventLoop whenever it runs the app in a subprocess
+    (`--reload`, `--workers`), and on Windows asyncio CANNOT spawn a child process
+    on a Selector loop — it raises NotImplementedError, which the SDK reports as the
+    unhelpful "Failed to start Claude Code: ". uvicorn instantiates that loop class
+    itself, so setting an event-loop policy here would not survive; owning a loop for
+    the duration of the call is what actually works.
+    """
+    loop = asyncio.ProactorEventLoop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+async def run_assistant(q: str, me: str) -> str:
+    """One model turn, sandboxed. Kept separate from the endpoint so tests can
+    replace it without touching auth, validation or rate limiting."""
+    now = time.time()
+    opts = ClaudeAgentOptions(
+        system_prompt=(
+            "You answer questions about the user's calendar events in a messenger app. "
+            f"The current local datetime is {when_str(now)}. "
+            "Resolve relative dates like 'next week' or 'tomorrow' to concrete ISO "
+            "datetimes yourself before calling a tool. Answer ONLY from tool results; "
+            "if the tools return nothing, say so plainly. You cannot access other "
+            "users' data — never claim otherwise. Never mention account emails, file "
+            "paths, tool names or anything about the system you run on: the person "
+            f"reading your reply is the messenger user '{me}' and nobody else. "
+            "Reply in 1-3 sentences of plain text."
+        ),
+        mcp_servers={"events": events_toolset(me)},
+        # tools=[] is the load-bearing guardrail: it removes EVERY built-in tool, so
+        # Bash/Read/Write never enter the model's context. allowed_tools below is only
+        # a permission-prompt bypass — on its own it would leave those tools reachable.
+        tools=[],
+        allowed_tools=[f"mcp__events__{n}" for n in ASSISTANT_TOOLS],
+        strict_mcp_config=True,   # ignore any .mcp.json / user-level MCP servers on this box
+        setting_sources=[],       # no CLAUDE.md, settings, hooks or skills — injection surfaces
+        max_turns=5,              # bounds a runaway loop, and with it the usage window
+        cwd=ASSISTANT_CWD,
+    )
+    answer = collect_answer(q, opts)
+    if sys.platform == "win32" and not isinstance(
+            asyncio.get_running_loop(), asyncio.ProactorEventLoop):
+        # ponytail: one thread per question, which the 6/min limit already bounds.
+        # A timeout abandons the thread rather than killing it; the CLI still exits
+        # on its own. Worth revisiting only if /assistant ever gets a real budget.
+        return await asyncio.to_thread(run_on_proactor, answer)
+    return await answer
+
+
+@app.post("/assistant", dependencies=[Depends(assistant_limit)])
+async def ask_assistant(body: Question, me: str = Depends(current_user)):
+    q = body.q.strip()
+    if not (0 < len(q) <= 500):
+        raise HTTPException(400, "question must be 1-500 characters")
+    if query is None:
+        raise HTTPException(503, "assistant unavailable")
+    try:
+        answer = await asyncio.wait_for(run_assistant(q, me), timeout=ASSISTANT_TIMEOUT)
+    except (asyncio.TimeoutError, ClaudeSDKError, OSError) as e:
+        # the caller learns nothing about the SDK, the CLI or the login state — but the
+        # operator does: a timeout and a dead CLI are the same 503 from the outside
+        cause = e.__cause__ or e.__context__      # the SDK's own message is often empty
+        print(f"/assistant failed: {type(e).__name__}: {e}"
+              + (f" (caused by {type(cause).__name__}: {cause})" if cause else ""),
+              file=sys.stderr)
+        raise HTTPException(503, "assistant unavailable")
+    return {"answer": answer or "I couldn't find an answer to that."}
 
 
 
