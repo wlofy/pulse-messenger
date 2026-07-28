@@ -3,17 +3,26 @@
    micro-interactions, Outfit + Work Sans)
    ============================================================ */
 :root {
+  /* Accent palette. An accent supplies these five hues and everything downstream
+     — bubbles, buttons, focus rings, the page's ambient blobs — is derived from
+     them with color-mix, so a new theme is five lines and no component edits. */
   --primary: #4f6ef7;
   --primary-strong: #3b5bdb;
   --secondary: #8b7cf6;
+  --tertiary: #60a5fa;
+  --quaternary: #5eead4;
   --online: #10b981;
+
+  /* how strongly the ambient blobs read; dark mode turns these down */
+  --blob-strong: 50%;
+  --blob-soft: 38%;
 
   /* Liquid glass: a soft page tint behind see-through, refracting surfaces */
   --page: #e8eefc;
   --bg: rgba(255, 255, 255, 0.22);
   --bg-raised: rgba(255, 255, 255, 0.4);
   --bg-hover: rgba(255, 255, 255, 0.62);
-  --bg-active: rgba(99, 118, 247, 0.2);
+  --bg-active: color-mix(in srgb, var(--primary) 20%, transparent);
   --border: rgba(255, 255, 255, 0.55);
 
   /* Realistic glass, layered:
@@ -41,18 +50,24 @@
   --glass-lift: 0 12px 34px rgba(20, 26, 70, 0.2);
 
   --bubble-in: rgba(255, 255, 255, 0.4);
-  --bubble-out: linear-gradient(135deg, rgba(99, 118, 247, 0.82), rgba(139, 124, 246, 0.82));
-  --bubble-out-solid: #4f6ef7;
+  --bubble-out: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary) 84%, transparent),
+    color-mix(in srgb, var(--secondary) 84%, transparent)
+  );
+  --bubble-out-solid: var(--primary);
 
   --text: #1f2a44;
   --text-muted: #5a6b8c;
   --text-faint: #9aa7c2;
 
   --tick: rgba(255, 255, 255, 0.85);
-  --tick-read: #22d3ee;
+  /* the read receipt is deliberately a DIFFERENT hue from the bubble it sits on,
+     so it reads as a status change rather than decoration — tertiary is that hue */
+  --tick-read: var(--tertiary);
 
   --danger: #ef4444;
-  --ring: #6f8cff;
+  --ring: color-mix(in srgb, var(--primary) 72%, white);
   --shadow: 0 12px 40px rgba(31, 41, 110, 0.16);
 
   --r-lg: 18px;
@@ -80,7 +95,7 @@
   --bg: rgba(255, 255, 255, 0.05);
   --bg-raised: rgba(255, 255, 255, 0.085);
   --bg-hover: rgba(255, 255, 255, 0.15);
-  --bg-active: rgba(99, 118, 247, 0.32);
+  --bg-active: color-mix(in srgb, var(--primary) 32%, transparent);
   --border: rgba(255, 255, 255, 0.12);
 
   /* brightness() must drop below 1 or the frost glows white over dark content */
@@ -111,19 +126,47 @@
   --text-faint: #7f8caa;   /* lightened to clear 4.5:1 on --page; timestamps use it */
 
   --danger: #f87171;
-  --ring: #7d96ff;
   --shadow: 0 14px 44px rgba(0, 0, 0, 0.6);
+
+  /* the same blobs, turned down so glass surfaces stay readable over them */
+  --blob-strong: 32%;
+  --blob-soft: 22%;
 
   color-scheme: dark;
 }
 
-/* the page's ambient blobs: same composition, far dimmer so glass stays readable */
-:root[data-theme='dark'] body {
-  background-image:
-    radial-gradient(60% 60% at 12% 8%, rgba(79, 96, 210, 0.34), transparent 60%),
-    radial-gradient(55% 55% at 88% 12%, rgba(40, 96, 175, 0.3), transparent 60%),
-    radial-gradient(60% 60% at 82% 92%, rgba(112, 78, 195, 0.3), transparent 60%),
-    radial-gradient(52% 52% at 8% 92%, rgba(26, 130, 128, 0.24), transparent 60%);
+/* ============================================================
+   Accent themes — each supplies five hues; bubbles, buttons, rings and the
+   page's ambient blobs all derive from them, so no component rules change.
+   Set by App.jsx on <html> (data-accent) and stored per device.
+   ============================================================ */
+:root[data-accent='violet'] {
+  --primary: #7c5cf7;
+  --primary-strong: #6538e8;
+  --secondary: #c084fc;
+  --tertiary: #a78bfa;
+  --quaternary: #f0abfc;
+}
+:root[data-accent='emerald'] {
+  --primary: #0ea47a;
+  --primary-strong: #0b7f5f;
+  --secondary: #34d399;
+  --tertiary: #22d3ee;
+  --quaternary: #a7f3d0;
+}
+:root[data-accent='rose'] {
+  --primary: #e8385b;
+  --primary-strong: #c81e45;
+  --secondary: #fb7185;
+  --tertiary: #f472b6;
+  --quaternary: #fda4af;
+}
+:root[data-accent='amber'] {
+  --primary: #d97706;
+  --primary-strong: #b45309;
+  --secondary: #fb923c;
+  --tertiary: #fbbf24;
+  --quaternary: #fcd34d;
 }
 
 /* a pale scrim would wash the page out — dim it instead */
@@ -131,6 +174,33 @@
 
 .theme-btn svg { transition: transform 0.35s var(--ease-spring); }
 .theme-btn:hover svg { transform: rotate(25deg); }
+
+/* --- accent picker (profile panel) --- */
+.accent-picker { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.setup-field-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.accent-row { display: flex; gap: 10px; }
+.accent-dot {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: #fff;
+  background: linear-gradient(135deg, var(--sw-from), var(--sw-to));
+  box-shadow: 0 0 0 2px transparent;
+  transition: box-shadow 0.18s, transform 0.18s var(--ease-spring);
+}
+.accent-dot:hover { transform: scale(1.12); }
+.accent-dot:active { transform: scale(0.93); }
+/* the ring is drawn in the swatch's own colour so the selection reads at a glance */
+.accent-dot.on {
+  box-shadow: 0 0 0 2px var(--bg-raised), 0 0 0 4px var(--sw-from);
+  transform: scale(1.06);
+}
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -142,12 +212,14 @@ body {
   line-height: 1.5;
   color: var(--text);
   background-color: var(--page);
+  /* derived from the accent, so switching theme retints the whole page */
   background-image:
-    radial-gradient(60% 60% at 12% 8%, rgba(129, 140, 248, 0.5), transparent 60%),
-    radial-gradient(55% 55% at 88% 12%, rgba(96, 165, 250, 0.45), transparent 60%),
-    radial-gradient(60% 60% at 82% 92%, rgba(167, 139, 250, 0.45), transparent 60%),
-    radial-gradient(52% 52% at 8% 92%, rgba(94, 234, 212, 0.38), transparent 60%);
+    radial-gradient(60% 60% at 12% 8%, color-mix(in srgb, var(--primary) var(--blob-strong), transparent), transparent 60%),
+    radial-gradient(55% 55% at 88% 12%, color-mix(in srgb, var(--tertiary) var(--blob-strong), transparent), transparent 60%),
+    radial-gradient(60% 60% at 82% 92%, color-mix(in srgb, var(--secondary) var(--blob-strong), transparent), transparent 60%),
+    radial-gradient(52% 52% at 8% 92%, color-mix(in srgb, var(--quaternary) var(--blob-soft), transparent), transparent 60%);
   background-attachment: fixed;
+  transition: background-color 0.35s var(--ease-out);
   overflow: hidden;
 }
 button {
@@ -174,10 +246,10 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
    ============================================================ */
 .app {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  /* the sidebar grows a little on big screens instead of stranding a fixed 340px
+     column next to a very wide chat pane; clamp keeps it sane at both extremes */
+  grid-template-columns: clamp(300px, 22vw, 420px) 1fr;
   height: 100%;
-  max-width: 1600px;
-  margin: 0 auto;
 }
 
 .icon-btn {
@@ -400,8 +472,8 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
   min-height: 0;      /* let .messages scroll instead of growing the whole column */
   overflow: hidden;   /* keeps the composer pinned when history gets long */
   background:
-    radial-gradient(1200px 500px at 80% -10%, rgba(99, 118, 247, 0.12), transparent 60%),
-    radial-gradient(900px 500px at 0% 110%, rgba(139, 124, 246, 0.1), transparent 60%);
+    radial-gradient(1200px 500px at 80% -10%, color-mix(in srgb, var(--primary) 12%, transparent), transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, color-mix(in srgb, var(--secondary) 10%, transparent), transparent 60%);
 }
 .chat-empty { align-items: center; justify-content: center; }
 .chat-empty-inner { text-align: center; color: var(--text-muted); animation: fade-up 0.5s var(--ease-out); }
@@ -415,6 +487,44 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
 }
 .chat-empty-inner h2 { margin: 18px 0 4px; font-size: 26px; color: var(--text); }
 .chat-empty-inner p { margin: 0; }
+.wordmark { font-family: var(--font-heading); font-weight: 600; letter-spacing: -0.02em; }
+.wordmark span { font-weight: 300; opacity: 0.65; }
+.chat-empty-inner .slogan {
+  margin: 0 0 14px;
+  font-size: 14.5px;
+  font-style: italic;
+  background: linear-gradient(100deg, var(--primary), var(--secondary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* --- persistent brand lockup, top of the sidebar --- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 16px 3px;
+  flex-shrink: 0;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+.brand-name {
+  font-family: var(--font-heading);
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.brand-name span { font-weight: 300; color: var(--text-muted); }
 
 .chat-header {
   display: flex;
@@ -498,7 +608,7 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
 .row.mine .bubble {
   background: var(--bubble-out);
   border-color: rgba(255, 255, 255, 0.28);
-  box-shadow: 0 6px 18px rgba(79, 110, 247, 0.28);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 28%, transparent);
   color: #fff;
   transform-origin: bottom right;
 }
@@ -538,7 +648,7 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
 .ticks.delivered .tick-2,
 .ticks.read .tick-2 { stroke-dashoffset: 0; opacity: 1; }
 .ticks.read { color: var(--tick-read); animation: tick-read 0.45s var(--ease-spring); }
-.chat-item-preview .ticks.read { color: #22d3ee; }
+.chat-item-preview .ticks.read { color: var(--tick-read); }
 @keyframes tick-read { 35% { transform: scale(1.25); } }
 
 /* --- typing indicator --- */
@@ -853,8 +963,8 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
   justify-content: center;
   padding: 24px;
   background:
-    radial-gradient(900px 480px at 15% 0%, rgba(99, 118, 247, 0.22), transparent 60%),
-    radial-gradient(800px 480px at 90% 100%, rgba(139, 124, 246, 0.2), transparent 60%),
+    radial-gradient(900px 480px at 15% 0%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 60%),
+    radial-gradient(800px 480px at 90% 100%, color-mix(in srgb, var(--secondary) 20%, transparent), transparent 60%),
     var(--page);
 }
 .setup-card {
@@ -885,7 +995,36 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
   color: #fff;
   background: linear-gradient(135deg, var(--primary), var(--secondary));
 }
+.setup-brand-text { display: flex; flex-direction: column; gap: 2px; }
+.setup-brand-text h1 { margin: 0; font-size: 26px; line-height: 1.1; }
+.setup-brand-text .slogan {
+  margin: 0;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--text-muted);
+}
 .setup-tagline { margin: -8px 0 0; color: var(--text-muted); font-size: 14px; }
+
+/* --- the mark draws itself like a monitor trace, then the tile takes a beat ---
+   pathLength=100 on the glyph makes the dash maths exact regardless of icon size. */
+.beating { animation: logo-beat 2.8s var(--ease-out) infinite; }
+.beating svg path {
+  stroke-dasharray: 100;
+  animation: logo-trace 2.8s var(--ease-out) infinite;
+}
+@keyframes logo-trace {
+  0%   { stroke-dashoffset: 100; }   /* nothing drawn */
+  40%  { stroke-dashoffset: 0; }     /* swept in, left to right */
+  72%  { stroke-dashoffset: 0; }     /* held, so the mark is readable */
+  100% { stroke-dashoffset: -100; }  /* sweeps off the right edge, then repeats */
+}
+@keyframes logo-beat {
+  0%, 34%, 100% { transform: scale(1); }
+  40% { transform: scale(1.09); }    /* the beat lands as the trace completes */
+  47% { transform: scale(1); }
+  53% { transform: scale(1.045); }
+  60% { transform: scale(1); }
+}
 
 .setup-avatar { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .setup-avatar-btn {
@@ -1011,7 +1150,7 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
 /* outgoing bubble — same glass sheen + rim over the indigo gradient */
 .row.mine .bubble {
   background: var(--glass-sheen), var(--bubble-out);
-  box-shadow: var(--glass-rim), 0 12px 30px rgba(79, 110, 247, 0.34);
+  box-shadow: var(--glass-rim), 0 12px 30px color-mix(in srgb, var(--primary) 34%, transparent);
   backdrop-filter: var(--glass-filter-strong);
   -webkit-backdrop-filter: var(--glass-filter-strong);
 }
@@ -1673,7 +1812,7 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
   border-radius: 50%;
   background: var(--primary);
   color: #fff;
-  box-shadow: 0 8px 22px rgba(79, 110, 247, 0.5);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--primary) 50%, transparent);
   transition: background 0.15s, transform 0.2s var(--ease-spring);
 }
 .assistant-fab:hover { background: var(--primary-strong); transform: scale(1.06); }
@@ -1894,5 +2033,11 @@ h1, h2, strong { font-family: var(--font-heading); font-weight: 500; }
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  /* the rule above would freeze the trace on its LAST frame, where the stroke has
+     swept off and the logo is invisible — pin it fully drawn instead */
+  .beating svg path {
+    stroke-dasharray: none !important;
+    stroke-dashoffset: 0 !important;
   }
 }

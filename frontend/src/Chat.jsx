@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { mediaUrl } from './api.js'
 import Avatar from './Avatar.jsx'
-import { ArrowLeftIcon, ImageIcon, MessageIcon, ScanEyeIcon, SendIcon, SmilePlusIcon, Ticks, XIcon } from './icons.jsx'
+import { ArrowLeftIcon, ImageIcon, PulseLogo, ScanEyeIcon, SendIcon, SmilePlusIcon, Ticks, XIcon } from './icons.jsx'
 import { altTextFor, bestReadyEngine, detectIn, prepareImage } from './vision.js'
 
 const QUICK_REACTIONS = ['❤️', '😂', '👍', '😮', '😢', '🔥']
@@ -199,8 +199,9 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
     return (
       <main className="chat chat-empty">
         <div className="chat-empty-inner">
-          <span className="chat-empty-logo"><MessageIcon size={40} /></span>
-          <h2>Pulse</h2>
+          <span className="chat-empty-logo beating"><PulseLogo size={44} /></span>
+          <h2 className="wordmark">Pulse <span>Messenger</span></h2>
+          <p className="slogan">Conversations with a pulse.</p>
           <p>Pick a conversation, or search a username to start one.</p>
         </div>
       </main>

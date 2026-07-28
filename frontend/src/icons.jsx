@@ -119,6 +119,15 @@ export const XIcon = (p) => (
   </I>
 )
 
+// The wordmark's glyph: a heartbeat trace — the "pulse" the app is named for.
+// pathLength normalises the trace to 100 units so the draw-on animation in
+// styles.css can use round dash numbers instead of the real, awkward length.
+export const PulseLogo = (p) => (
+  <I {...p}>
+    <path pathLength="100" d="M2 12h3.5l2.5-7 4.5 14 2.5-7H22" />
+  </I>
+)
+
 export const SunIcon = (p) => (
   <I {...p}>
     <circle cx="12" cy="12" r="4" />

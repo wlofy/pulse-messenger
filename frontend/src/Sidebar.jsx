@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
 import {
-  BellIcon, CalendarIcon, LogOutIcon, MessageIcon, MoonIcon, SearchIcon, SunIcon, Ticks, XIcon,
+  BellIcon, CalendarIcon, LogOutIcon, MessageIcon, MoonIcon, PulseLogo, SearchIcon, SunIcon,
+  Ticks, XIcon,
 } from './icons.jsx'
 
 function timeLabel(ts) {
@@ -48,6 +49,13 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
 
   return (
     <aside className="sidebar">
+      {/* the empty state carries the full lockup; this keeps the brand on screen
+          once a conversation is open */}
+      <div className="brand" title="Conversations with a pulse.">
+        <span className="brand-mark"><PulseLogo size={15} /></span>
+        <span className="brand-name">Pulse <span>Messenger</span></span>
+      </div>
+
       <header className="sidebar-header">
         <button className="avatar-btn" onClick={() => onOpenProfile('me')} aria-label="My profile" title="My profile">
           <Avatar user={me} size={40} />
