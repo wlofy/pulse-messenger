@@ -26,6 +26,38 @@ export default function App() {
   }, [theme])
   const toggleTheme = useCallback(() => setTheme((t) => (t === 'dark' ? 'light' : 'dark')), [])
 
+  // Accent colour is the second, independent half of the theme: it works the same
+  // in light and dark, so the two are stored separately rather than as one combined
+  // "theme name" that would double every time either side gains an option.
+  const [accent, setAccent] = useState(() => {
+    try { return localStorage.getItem('pulse:accent') || 'blue' } catch { return 'blue' }
+  })
+  useEffect(() => {
+    document.documentElement.dataset.accent = accent
+    try { localStorage.setItem('pulse:accent', accent) } catch { /* storage blocked */ }
+    // Repaint the tab icon in the same accent — the attribute is set just above, so
+    // the computed values read here are already the new theme's. Reading them back
+    // (rather than duplicating the hex codes in JS) keeps styles.css the one place
+    // a palette is defined.
+    const css = getComputedStyle(document.documentElement)
+    const from = css.getPropertyValue('--primary').trim()
+    const to = css.getPropertyValue('--secondary').trim()
+    const icon = document.querySelector('link[rel="icon"]')
+    if (icon && from && to) {
+      icon.href = 'data:image/svg+xml,' + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">` +
+        `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
+        `<stop offset="0" stop-color="${from}"/><stop offset="1" stop-color="${to}"/>` +
+        // a raw '#' here — encodeURIComponent below escapes it; pre-escaping it
+        // would double-encode to %2523 and silently break the gradient reference
+        `</linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#g)"/>` +
+        `<g transform="translate(4 4)"><path d="M2 12h3.5l2.5-7 4.5 14 2.5-7H22" ` +
+        `stroke="white" stroke-width="2.6" fill="none" stroke-linecap="round" ` +
+        `stroke-linejoin="round"/></g></svg>`
+      )
+    }
+  }, [accent])
+
   // sessionStorage (not local) so each browser tab can be a different user — handy
   // for trying the realtime features alone with two tabs side by side
   const [me, setMe] = useState(() => {
@@ -50,6 +82,8 @@ export default function App() {
       me={me}
       theme={theme}
       onToggleTheme={toggleTheme}
+      accent={accent}
+      onAccentChange={setAccent}
       onMeChange={(user) => {
         // profile responses carry no token — keep the one we have
         const merged = { ...me, ...user }
@@ -65,7 +99,7 @@ export default function App() {
   )
 }
 
-function ChatApp({ me, theme, onToggleTheme, onMeChange, onLogout }) {
+function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange, onLogout }) {
   const [chats, setChats] = useState([])
   const [active, setActive] = useState(null)        // username of the open chat
   const [activeUser, setActiveUser] = useState(null) // their profile (works pre-history too)
@@ -369,6 +403,8 @@ function ChatApp({ me, theme, onToggleTheme, onMeChange, onLogout }) {
         <ProfilePanel
           me={me}
           view={profileView}
+          accent={accent}
+          onAccentChange={onAccentChange}
           onClose={() => setProfileView(null)}
           onMeChange={(user) => { onMeChange(user); loadChats() }}
         />

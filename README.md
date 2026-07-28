@@ -40,8 +40,10 @@ from heavy frameworks.
     site closed — VAPID keys are auto-generated and persisted on first run
 - **Rate limiting** — in-process sliding window on the auth endpoints and data plane
 - **Profiles** — display name, bio, avatar
-- **Dark mode** — toggle in the sidebar; follows your OS on first visit and is remembered
-  per device (the login itself stays per-tab, so two tabs can still be two users)
+- **Theming** — a dark-mode toggle in the sidebar (follows your OS on first visit) plus five
+  accent themes picked from your profile. Mode and accent are independent and stored per
+  device, and an accent retints everything derived from it — bubbles, the ambient background
+  gradients, even the browser tab icon. Adding a sixth theme is five CSS variables.
 
 ## Stack
 

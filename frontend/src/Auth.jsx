@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
-import { CameraIcon, MessageIcon, XIcon } from './icons.jsx'
+import { CameraIcon, PulseLogo, XIcon } from './icons.jsx'
 
 // Resize any picked image to a 128px cover-cropped JPEG data URL (~10 KB).
 export function toAvatar(file) {
@@ -76,8 +76,11 @@ export default function Auth({ onDone }) {
     <div className="setup">
       <form className="setup-card" onSubmit={submit}>
         <div className="setup-brand">
-          <span className="setup-logo"><MessageIcon size={26} /></span>
-          <h1>Pulse</h1>
+          <span className="setup-logo beating"><PulseLogo size={26} /></span>
+          <div className="setup-brand-text">
+            <h1 className="wordmark">Pulse <span>Messenger</span></h1>
+            <p className="slogan">Conversations with a pulse.</p>
+          </div>
         </div>
 
         <div className="auth-tabs" role="tablist">

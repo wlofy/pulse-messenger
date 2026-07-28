@@ -2,10 +2,20 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
 import { toAvatar } from './Auth.jsx'
-import { CameraIcon, XIcon } from './icons.jsx'
+import { CameraIcon, CheckIcon, XIcon } from './icons.jsx'
+
+// Each entry names a `data-accent` value in styles.css; the swatch previews the
+// two hues that theme actually paints with, so the dot IS the theme.
+const ACCENTS = [
+  { id: 'blue', label: 'Blue', from: '#4f6ef7', to: '#8b7cf6' },
+  { id: 'violet', label: 'Violet', from: '#7c5cf7', to: '#f0abfc' },
+  { id: 'emerald', label: 'Emerald', from: '#0ea47a', to: '#22d3ee' },
+  { id: 'rose', label: 'Rose', from: '#e8385b', to: '#f472b6' },
+  { id: 'amber', label: 'Amber', from: '#d97706', to: '#fbbf24' },
+]
 
 // view: 'me' -> edit my profile; any username -> read-only card of that user.
-export default function ProfilePanel({ me, view, onClose, onMeChange }) {
+export default function ProfilePanel({ me, view, accent, onAccentChange, onClose, onMeChange }) {
   const mine = view === 'me'
   const [other, setOther] = useState(null) // fetched profile when viewing someone else
 
@@ -116,6 +126,29 @@ export default function ProfilePanel({ me, view, onClose, onMeChange }) {
             <button className="btn-primary" disabled={busy}>
               {busy ? <span className="spinner" aria-label="saving" /> : 'Save'}
             </button>
+
+            {/* outside the save flow on purpose: it applies instantly and is stored
+                on this device, not on the account */}
+            <div className="accent-picker" role="radiogroup" aria-label="Accent colour">
+              <span className="setup-field-label">Theme colour</span>
+              <div className="accent-row">
+                {ACCENTS.map((a) => (
+                  <button
+                    type="button"
+                    key={a.id}
+                    role="radio"
+                    aria-checked={accent === a.id}
+                    aria-label={a.label}
+                    title={a.label}
+                    className={`accent-dot${accent === a.id ? ' on' : ''}`}
+                    style={{ '--sw-from': a.from, '--sw-to': a.to }}
+                    onClick={() => onAccentChange(a.id)}
+                  >
+                    {accent === a.id && <CheckIcon size={14} />}
+                  </button>
+                ))}
+              </div>
+            </div>
           </form>
         ) : !other ? (
           <div className="profile-loading"><span className="spinner" aria-label="loading" /></div>
