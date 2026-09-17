@@ -47,10 +47,23 @@ export const api = {
   chats: () => authed('/chats'),
   messages: (other) => authed(`/messages?other=${enc(other)}`),
   profile: (username) => authed(`/profile/${enc(username)}`),
+  // kind: 'block' | 'mute'; resolves to the new {blocked, muted}
+  setRelation: (username, kind, on) =>
+    authed(`/users/${enc(username)}/${kind}`, { method: 'POST', body: JSON.stringify({ on }) }),
   updateProfile: (payload) =>
     authed('/profile', { method: 'POST', body: JSON.stringify(payload) }),
   uploadMedia: (data, width, height) =>
     authed('/media', { method: 'POST', body: JSON.stringify({ data, width, height }) }),
+  uploadVoice: (data, duration) =>
+    authed('/media', { method: 'POST', body: JSON.stringify({ data, duration }) }),
+  // people who've answered your DM — the only ones you can add to groups or invite
+  contacts: () => authed('/contacts'),
+  groupMessages: (id) => authed(`/messages?group=${id}`),
+  createGroup: (name, members) =>
+    authed('/groups', { method: 'POST', body: JSON.stringify({ name, members }) }),
+  addGroupMember: (id, username) =>
+    authed(`/groups/${id}/members`, { method: 'POST', body: JSON.stringify({ username }) }),
+  leaveGroup: (id) => authed(`/groups/${id}/leave`, { method: 'POST' }),
   notifications: () => authed('/notifications'),
   readNotifications: () => authed('/notifications/read', { method: 'POST' }),
   clearNotifications: () => authed('/notifications/clear', { method: 'POST' }),

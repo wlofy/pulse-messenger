@@ -52,6 +52,13 @@ A = _signup("ava")      # creator
 B = _signup("ben")      # invitee
 C = _signup("cleo")     # neither — the one who must never see anything
 
+# invites are contacts-only, and a contact is a DM that was answered. Seed that
+# history straight into the db: the websocket path is test_chat's subject, not this one's.
+for sender, recipient in (("ava", "ben"), ("ben", "ava")):
+    main.db.execute("INSERT INTO messages(sender, recipient, text, ts) VALUES (?,?,?,?)",
+                    (sender, recipient, "hi", time.time()))
+main.db.commit()
+
 
 def _make_event(headers, title, when, invitees):
     r = httpx.post(f"{BASE}/events", headers=headers,
@@ -68,6 +75,7 @@ def test_create_validation():
     assert bad({"title": "ok", "event_date": -5}) == 400                     # not a real ts
     assert bad({"title": "ok", "event_date": SOON, "invitees": ["ghost"]}) == 400
     assert bad({"title": "ok", "event_date": SOON, "invitees": ["ava"]}) == 400   # self-invite
+    assert bad({"title": "ok", "event_date": SOON, "invitees": ["cleo"]}) == 400  # not a contact
     # duplicate invitees collapse rather than blowing up the PK
     ev = _make_event(A, "dedupe", SOON, ["ben", "ben"])
     assert [a["invitee"] for a in ev["attendees"]] == ["ben"]

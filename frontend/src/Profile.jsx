@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
 import { toAvatar } from './Auth.jsx'
-import { CameraIcon, CheckIcon, XIcon } from './icons.jsx'
+import { BellIcon, BellOffIcon, CameraIcon, CheckIcon, XIcon } from './icons.jsx'
 
 // Each entry names a `data-accent` value in styles.css; the swatch previews the
 // two hues that theme actually paints with, so the dot IS the theme.
@@ -15,7 +15,7 @@ const ACCENTS = [
 ]
 
 // view: 'me' -> edit my profile; any username -> read-only card of that user.
-export default function ProfilePanel({ me, view, accent, onAccentChange, onClose, onMeChange }) {
+export default function ProfilePanel({ me, view, accent, onAccentChange, onClose, onMeChange, onRelation }) {
   const mine = view === 'me'
   const [other, setOther] = useState(null) // fetched profile when viewing someone else
 
@@ -25,6 +25,19 @@ export default function ProfilePanel({ me, view, accent, onAccentChange, onClose
   const [avatarChanged, setAvatarChanged] = useState(false)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef()
+
+  const toggle = async (kind) => {
+    const on = !other[kind === 'block' ? 'blocked' : 'muted']
+    if (kind === 'block' && on && !confirm(
+      `Block ${other.name || other.username}? They won't be able to message you, see when you're online, or invite you to events.`
+    )) return
+    setBusy(true)
+    try {
+      await onRelation(other.username, kind, on)
+      setOther(await api.profile(other.username)) // a block changes presence too
+    } catch { /* leave the buttons as they were */ }
+    setBusy(false)
+  }
 
   useEffect(() => {
     if (!mine) api.profile(view).then(setOther).catch(onClose)
@@ -162,6 +175,15 @@ export default function ProfilePanel({ me, view, accent, onAccentChange, onClose
             {other.bio
               ? <p className="profile-bio">{other.bio}</p>
               : <p className="profile-bio empty">No bio yet.</p>}
+            <div className="profile-actions">
+              <button type="button" className="btn-ghost" disabled={busy} onClick={() => toggle('mute')}>
+                {other.muted ? <BellIcon size={16} /> : <BellOffIcon size={16} />}
+                {other.muted ? 'Unmute' : 'Mute'}
+              </button>
+              <button type="button" className="btn-ghost danger" disabled={busy} onClick={() => toggle('block')}>
+                {other.blocked ? 'Unblock' : 'Block'}
+              </button>
+            </div>
           </div>
         )}
       </div>

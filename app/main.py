@@ -24,7 +24,7 @@ from py_vapid import Vapid
 
 try:
     from claude_agent_sdk import (query, ClaudeAgentOptions, tool, create_sdk_mcp_server,
-                                  AssistantMessage, TextBlock, ClaudeSDKError)
+                                  AssistantMessage, ResultMessage, TextBlock, ClaudeSDKError)
 except ImportError:      # the assistant is optional: /assistant 503s, the rest of the app runs
     query = None
     ClaudeSDKError = Exception
@@ -102,6 +102,27 @@ CREATE TABLE IF NOT EXISTS invitations(
    PRIMARY KEY (event_id, invitee)   -- one invitation per user per event; dedupe by design
 );
 CREATE INDEX IF NOT EXISTS idx_inv_invitee ON invitations(invitee);
+-- "groups" is an SQL keyword (window frames), hence chat_groups
+CREATE TABLE IF NOT EXISTS chat_groups(
+   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   name TEXT NOT NULL,
+   creator TEXT NOT NULL,
+   ts REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_members(
+   group_id INTEGER NOT NULL,
+   username TEXT NOT NULL,
+   joined_after INTEGER NOT NULL DEFAULT 0,  -- newest message id when they joined: no older history
+   last_read INTEGER NOT NULL DEFAULT 0,     -- newest message id they've seen, for the unread badge
+   PRIMARY KEY (group_id, username)
+);
+CREATE INDEX IF NOT EXISTS idx_gm_user ON group_members(username);
+CREATE TABLE IF NOT EXISTS relations(
+   username TEXT NOT NULL,      -- who set it
+   other TEXT NOT NULL,         -- who it's about
+   kind TEXT NOT NULL CHECK(kind IN ('block','mute')),
+   PRIMARY KEY (username, other, kind)
+);
 """)
 # repair a `reactions` table left by an earlier broken draft: CREATE TABLE IF NOT
 # EXISTS never fixes an existing table, so a malformed one persists silently. It
@@ -132,8 +153,24 @@ for col in ("media_id", "alt"):
         db.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
     except sqlite3.OperationalError:
         pass
+# hidden=1: sent while the recipient had the sender blocked. Kept (the sender still
+# sees it, stuck at one tick) but never shown to the recipient, even after unblocking.
+try:
+    db.execute("ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
+# group_id: set on a group message, whose recipient is then ''. Every DM query keys on
+#           a real username, so a group message can never leak into one.
+# duration: seconds, voice notes only. MediaRecorder's webm often reports an Infinity
+#           duration in Chrome, so the recorder's own clock is the trustworthy one.
+for table, coldef in (("messages", "group_id INTEGER"), ("media", "duration REAL")):
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+    except sqlite3.OperationalError:
+        pass
 # created after the ALTER, not in the script above — the column may not exist yet
 db.execute("CREATE INDEX IF NOT EXISTS idx_msg_media ON messages(media_id)")
+db.execute("CREATE INDEX IF NOT EXISTS idx_msg_group ON messages(group_id, id)")
 db.commit()
 
 
@@ -339,6 +376,73 @@ def profile_row(username : str):
             "name":row["name"], "bio": row["bio"]}
 
 
+# --- Block / mute -------------------------------------------------------------
+# One-directional rows: (me, other, kind). Mute only silences notifications. Block
+# also cuts messages, typing, reactions, presence and invites — the ephemeral ones in
+# BOTH directions, so neither side can watch the other come online.
+def has_rel(user: str, other: str, kind: str) -> bool:
+    return db.execute("SELECT 1 FROM relations WHERE username = ? AND other = ? AND kind = ?",
+                      (user, other, kind)).fetchone() is not None
+
+
+def blocked_between(a: str, b: str) -> bool:
+    return has_rel(a, b, "block") or has_rel(b, a, "block")
+
+
+def rel_flags(me: str, other: str) -> dict:
+    return {"blocked": has_rel(me, other, "block"), "muted": has_rel(me, other, "mute")}
+
+
+def seen_online(me: str, other: str) -> bool:
+    return other in online and not blocked_between(me, other)
+
+
+# A contact is someone you've DM'd who has also DM'd you back — replying IS accepting.
+# Derived from history rather than stored, so there's no request state to get out of
+# sync. Hidden (blocked) messages don't count, and a block ends the contact.
+DM_EXISTS = ("SELECT 1 FROM messages WHERE sender = ? AND recipient = ? "
+             "AND group_id IS NULL AND hidden = 0 LIMIT 1")
+
+
+def talked_both_ways(a: str, b: str) -> bool:
+    return bool(db.execute(DM_EXISTS, (a, b)).fetchone() and db.execute(DM_EXISTS, (b, a)).fetchone())
+
+
+def is_contact(a: str, b: str) -> bool:
+    return talked_both_ways(a, b) and not blocked_between(a, b)
+
+
+def contacts_of(me: str) -> list[str]:
+    rows = db.execute(
+        """SELECT DISTINCT m.recipient FROM messages m
+           WHERE m.sender = ? AND m.group_id IS NULL AND m.hidden = 0
+             AND EXISTS (SELECT 1 FROM messages r WHERE r.sender = m.recipient AND r.recipient = ?
+                         AND r.group_id IS NULL AND r.hidden = 0)
+           ORDER BY m.recipient""", (me, me))
+    return [r[0] for r in rows if not blocked_between(me, r[0])]
+
+
+class Toggle(BaseModel):
+    on: bool
+
+
+@app.post("/users/{username}/{kind}", dependencies=[Depends(api_limit)])
+def set_relation(username: str, kind: str, body: Toggle, me: str = Depends(current_user)):
+    if kind not in ("block", "mute"):
+        raise HTTPException(404, "not found")
+    if username == me:
+        raise HTTPException(400, f"you can't {kind} yourself")
+    profile_row(username)  # 404s on an unknown user
+    if body.on:
+        db.execute("INSERT OR IGNORE INTO relations(username, other, kind) VALUES (?,?,?)",
+                   (me, username, kind))
+    else:
+        db.execute("DELETE FROM relations WHERE username = ? AND other = ? AND kind = ?",
+                   (me, username, kind))
+    db.commit()
+    return rel_flags(me, username)
+
+
 
 
 class Credentials(BaseModel):
@@ -447,44 +551,60 @@ def push_unsubscribe(sub: PushSubscription, me: str = Depends(current_user)):
 # in full, every time that chat is opened.
 MAX_MEDIA_BYTES = 4 * 1024 * 1024
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+# what MediaRecorder produces: webm/ogg (Chrome, Firefox), mp4 (Safari)
+AUDIO_MIME = {"audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg"}
+MAX_VOICE_SECONDS = 300   # the recorder stops itself here
 
 
 class MediaUpload(BaseModel):
-    data: str            # a data URL: "data:image/jpeg;base64,…"
-    width: int           # natural pixels; sent so the bubble can reserve space pre-load
-    height: int
+    data: str            # a data URL: "data:image/jpeg;base64,…" or "data:audio/webm;codecs=opus;base64,…"
+    width: int = 0       # images: natural pixels, so the bubble can reserve space pre-load
+    height: int = 0
+    duration: float | None = None   # voice notes: seconds
 
 
-def preview(text: str, media_id: str | None, alt: str | None) -> str:
+def preview(text: str, media_id: str | None, alt: str | None, mime: str | None = None) -> str:
     """One-line summary of a message for the sidebar, toasts and push bodies.
     A photo falls back to its machine description, which is exactly what that
     description is for — a text channel can't show the picture."""
     if not media_id:
         return text
+    if mime and mime.startswith("audio/"):
+        return f"🎤 {text or 'Voice message'}"
     return f"📷 {text or alt or 'Photo'}"
 
 
 @app.post("/media", dependencies=[Depends(upload_limit)])
 def upload_media(body: MediaUpload, me: str = Depends(current_user)):
     header, _, payload = body.data.partition(",")
-    mime = header.removeprefix("data:").removesuffix(";base64")
-    if not header.endswith(";base64") or mime not in ALLOWED_MIME:
-        raise HTTPException(400, "expected a base64 data URL of a jpeg, png, webp or gif")
+    # drop codec parameters: "audio/webm;codecs=opus" is served back as plain audio/webm
+    mime = header.removeprefix("data:").removesuffix(";base64").split(";")[0]
+    voice = mime in AUDIO_MIME
+    if not header.endswith(";base64") or not (voice or mime in ALLOWED_MIME):
+        raise HTTPException(400, "expected a base64 data URL of an image or a voice recording")
     try:
         raw = base64.b64decode(payload, validate=True)
     except ValueError:      # binascii.Error subclasses it
         raise HTTPException(400, "malformed base64")
     if not raw:
-        raise HTTPException(400, "empty image")
+        raise HTTPException(400, "empty upload")
     if len(raw) > MAX_MEDIA_BYTES:
-        raise HTTPException(413, "image too large")
-    if not (0 < body.width <= 20_000 and 0 < body.height <= 20_000):
-        raise HTTPException(400, "implausible image dimensions")
+        raise HTTPException(413, "file too large")
+    if voice:
+        # +1: the client's timer can overshoot its own cutoff by a tick. NaN fails too.
+        if not (body.duration is not None and 0 < body.duration <= MAX_VOICE_SECONDS + 1):
+            raise HTTPException(400, "implausible voice message duration")
+        width = height = 0
+    else:
+        if not (0 < body.width <= 20_000 and 0 < body.height <= 20_000):
+            raise HTTPException(400, "implausible image dimensions")
+        width, height = body.width, body.height
     media_id = secrets.token_urlsafe(18)
-    db.execute("INSERT INTO media(id, owner, mime, width, height, bytes, ts) VALUES (?,?,?,?,?,?,?)",
-               (media_id, me, mime, body.width, body.height, raw, time.time()))
+    duration = body.duration if voice else None
+    db.execute("INSERT INTO media(id, owner, mime, width, height, bytes, ts, duration) VALUES (?,?,?,?,?,?,?,?)",
+               (media_id, me, mime, width, height, raw, time.time(), duration))
     db.commit()
-    return {"id": media_id, "width": body.width, "height": body.height}
+    return {"id": media_id, "width": width, "height": height, "mime": mime, "duration": duration}
 
 
 @app.get("/media/{media_id}")
@@ -500,8 +620,9 @@ def get_media(media_id: str, token: str = "", authorization: str = Header(defaul
     if not row:
         raise HTTPException(404, "no such image")
     if row["owner"] != me and not db.execute(
-        "SELECT 1 FROM messages WHERE media_id = ? AND (sender = ? OR recipient = ?)",
-        (media_id, me, me),
+        """SELECT 1 FROM messages WHERE media_id = ? AND (sender = ? OR (recipient = ? AND hidden = 0)
+               OR group_id IN (SELECT group_id FROM group_members WHERE username = ?))""",
+        (media_id, me, me, me),
     ).fetchone():
         raise HTTPException(404, "no such image")
     # ids are unique per upload and the bytes never change, so this can cache forever
@@ -517,7 +638,7 @@ def users(q: str = "", me: str = Depends(current_user)):
         (SELECT COUNT(*) FROM messages m
         WHERE m.sender = u.username
         AND m.recipient = ?
-        AND m.status != 'read') AS unread
+        AND m.status != 'read' AND m.hidden = 0) AS unread
         FROM users u
         WHERE u.username != ?
         AND (u.username LIKE '%' || ? || '%' OR u.name LIKE '%' || ? || '%')
@@ -527,23 +648,33 @@ def users(q: str = "", me: str = Depends(current_user)):
         (me,me, q, q),
     ).fetchall()
     return [
-        {"username": r["username"], "avatar" : r["avatar"], "name": r["name"],  "unread": r["unread"], "online": r["username"] in online}
+        {"username": r["username"], "avatar" : r["avatar"], "name": r["name"],  "unread": r["unread"],
+         "online": seen_online(me, r["username"]), **rel_flags(me, r["username"])}
         for r in rows
     ]
 
 @app.get("/messages", dependencies=[Depends(api_limit)])
-def messages(other: str, me: str = Depends(current_user)):
+def messages(other: str = "", group: int | None = None, me: str = Depends(current_user)):
+    """A DM (?other=username) or a group I belong to (?group=id)."""
+    if group is not None:
+        member = membership(group, me)
+        where, args = "m.group_id = ? AND m.id > ?", (group, member["joined_after"])
+    else:
+        where = ("m.group_id IS NULL AND ((m.sender = ? AND m.recipient = ?)"
+                 " OR (m.sender = ? AND m.recipient = ? AND m.hidden = 0))")
+        args = (me, other, other, me)
     # LEFT JOIN rather than copying the size onto the message row: the bubble needs
     # the photo's aspect ratio to reserve space *before* it loads, or every image
     # message shoves the conversation around as it arrives.
     rows = db.execute(
-        """
-        SELECT m.*, md.width AS media_w, md.height AS media_h
+        f"""
+        SELECT m.*, md.width AS media_w, md.height AS media_h,
+               md.mime AS media_mime, md.duration AS media_duration
         FROM messages m LEFT JOIN media md ON md.id = m.media_id
-        WHERE (m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ?)
+        WHERE {where}
         ORDER BY m.id
         """,
-        (me, other, other, me),
+        args,
     ).fetchall()
     msgs = [dict(r) for r in rows]
     if msgs:
@@ -582,32 +713,160 @@ def chats(me: str = Depends(current_user)):
     """The sidebar dock: everyone I have history with, newest conversation first"""
     partners = [r[0] for r in db.execute(
         """SELECT DISTINCT CASE WHEN sender = ? THEN recipient ELSE sender END
-           FROM messages WHERE sender = ? OR recipient = ?""", (me, me, me))]
+           FROM messages WHERE group_id IS NULL AND (sender = ? OR (recipient = ? AND hidden = 0))""",
+        (me, me, me))]
     out = []
     for p in partners:
         last = db.execute(
-            """SELECT * FROM messages
-               WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
-               ORDER BY id DESC LIMIT 1""", (me, p, p, me)).fetchone()
+            """SELECT m.*, md.mime FROM messages m LEFT JOIN media md ON md.id = m.media_id
+               WHERE (m.sender = ? AND m.recipient = ?) OR (m.sender = ? AND m.recipient = ? AND m.hidden = 0)
+               ORDER BY m.id DESC LIMIT 1""", (me, p, p, me)).fetchone()
         unread = db.execute(
-            "SELECT COUNT(*) FROM messages WHERE sender = ? AND recipient = ? AND status != 'read'",
+            "SELECT COUNT(*) FROM messages WHERE sender = ? AND recipient = ? AND status != 'read' AND hidden = 0",
             (p, me)).fetchone()[0]
         user = db.execute("SELECT avatar, name FROM users WHERE username = ?", (p,)).fetchone()
         out.append({
             "username": p, "avatar": user["avatar"] if user else None,
-            "name": user["name"] if user else None, "online": p in online,
+            "name": user["name"] if user else None, "online": seen_online(me, p), **rel_flags(me, p),
             "unread": unread,
-            "last_text": preview(last["text"], last["media_id"], last["alt"]),
+            "last_text": preview(last["text"], last["media_id"], last["alt"], last["mime"]),
             "last_ts": last["ts"],
             "last_sender": last["sender"], "last_status": last["status"],
         })
+    out += [group_summary(g, me) for g in db.execute(
+        "SELECT group_id FROM group_members WHERE username = ?", (me,)).fetchall()]
     out.sort(key=lambda c: c["last_ts"], reverse=True)
     return out
 
 
+@app.get("/contacts", dependencies=[Depends(api_limit)])
+def contacts(me: str = Depends(current_user)):
+    """People who can be added to groups and invited to events."""
+    out = []
+    for name in contacts_of(me):
+        row = profile_row(name)
+        out.append({"username": name, "avatar": row["avatar"], "name": row["name"],
+                    "online": seen_online(me, name)})
+    return out
+
+
+# --- Group chats ---------------------------------------------------------------
+# Members are always contacts of whoever added them. Group messages live in the same
+# `messages` table (recipient '', group_id set), so reactions and photos just work;
+# read receipts don't — "read by 3 of 7" isn't worth it, so groups track unread only.
+MAX_GROUP_MEMBERS = 50
+
+
+class GroupCreate(BaseModel):
+    name: str
+    members: list[str]
+
+
+class GroupAdd(BaseModel):
+    username: str
+
+
+def membership(group_id: int, user: str):
+    """The caller's member row, or 404 — never 403, which would confirm the group exists."""
+    row = db.execute("SELECT * FROM group_members WHERE group_id = ? AND username = ?",
+                     (group_id, user)).fetchone()
+    if not row:
+        raise HTTPException(404, "no such group")
+    return row
+
+
+def members_of(group_id: int) -> list[str]:
+    return [r[0] for r in db.execute(
+        "SELECT username FROM group_members WHERE group_id = ? ORDER BY username", (group_id,))]
+
+
+def newest_message_id() -> int:
+    return db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+
+
+def group_summary(row, me: str) -> dict:
+    gid = row["group_id"]
+    g = db.execute("SELECT * FROM chat_groups WHERE id = ?", (gid,)).fetchone()
+    member = membership(gid, me)
+    last = db.execute(
+        """SELECT m.*, md.mime FROM messages m LEFT JOIN media md ON md.id = m.media_id
+           WHERE m.group_id = ? AND m.id > ? ORDER BY m.id DESC LIMIT 1""",
+        (gid, member["joined_after"])).fetchone()
+    unread = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE group_id = ? AND id > ? AND sender != ?",
+        (gid, max(member["last_read"], member["joined_after"]), me)).fetchone()[0]
+    return {
+        "group_id": gid, "name": g["name"], "creator": g["creator"], "members": members_of(gid),
+        "unread": unread,
+        "last_text": preview(last["text"], last["media_id"], last["alt"], last["mime"]) if last else "",
+        "last_ts": last["ts"] if last else g["ts"],
+        "last_sender": last["sender"] if last else None, "last_status": None,
+    }
+
+
+async def group_changed(group_id: int, also: str | None = None):
+    """Membership changed: every online member (plus whoever just left) refetches chats."""
+    for name in set(members_of(group_id)) | ({also} if also else set()):
+        await push(name, {"type": "groups", "group_id": group_id})
+
+
+@app.post("/groups", dependencies=[Depends(api_limit)])
+async def create_group(body: GroupCreate, me: str = Depends(current_user)):
+    name = body.name.strip()
+    if not (0 < len(name) <= 60):
+        raise HTTPException(400, "group name must be 1-60 characters")
+    members = [m for m in dict.fromkeys(body.members) if m != me]
+    if not members:
+        raise HTTPException(400, "add at least one contact")
+    if len(members) + 1 > MAX_GROUP_MEMBERS:
+        raise HTTPException(400, f"groups hold at most {MAX_GROUP_MEMBERS} people")
+    for m in members:
+        if not is_contact(me, m):
+            raise HTTPException(400, f"{m} isn't one of your contacts")
+    gid = db.execute("INSERT INTO chat_groups(name, creator, ts) VALUES (?,?,?)",
+                     (name, me, time.time())).lastrowid
+    db.executemany("INSERT INTO group_members(group_id, username) VALUES (?,?)",
+                   [(gid, m) for m in [me, *members]])
+    db.commit()
+    await group_changed(gid)
+    for m in members:
+        await notify(m, "group", me, f'added you to "{name}"')
+    return group_summary({"group_id": gid}, me)
+
+
+@app.post("/groups/{group_id}/members", dependencies=[Depends(api_limit)])
+async def add_group_member(group_id: int, body: GroupAdd, me: str = Depends(current_user)):
+    membership(group_id, me)
+    who = body.username
+    if who in members_of(group_id):
+        raise HTTPException(409, "already in the group")
+    if not is_contact(me, who):
+        raise HTTPException(400, f"{who} isn't one of your contacts")
+    if len(members_of(group_id)) >= MAX_GROUP_MEMBERS:
+        raise HTTPException(400, f"groups hold at most {MAX_GROUP_MEMBERS} people")
+    newest = newest_message_id()
+    db.execute("INSERT INTO group_members(group_id, username, joined_after, last_read) VALUES (?,?,?,?)",
+               (group_id, who, newest, newest))
+    db.commit()
+    await group_changed(group_id)
+    name = db.execute("SELECT name FROM chat_groups WHERE id = ?", (group_id,)).fetchone()["name"]
+    await notify(who, "group", me, f'added you to "{name}"')
+    return group_summary({"group_id": group_id}, me)
+
+
+@app.post("/groups/{group_id}/leave", dependencies=[Depends(api_limit)])
+async def leave_group(group_id: int, me: str = Depends(current_user)):
+    membership(group_id, me)
+    # ponytail: an emptied group stays as an orphan row; sweep them if that ever matters
+    db.execute("DELETE FROM group_members WHERE group_id = ? AND username = ?", (group_id, me))
+    db.commit()
+    await group_changed(group_id, also=me)
+    return {"ok": True}
+
+
 @app.get("/profile/{username}", dependencies=[Depends(api_limit)])
 def get_profile(username: str, me: str = Depends(current_user)):
-    return {**profile_row(username), "online": username in online}
+    return {**profile_row(username), "online": seen_online(me, username), **rel_flags(me, username)}
 
 
 # --- Events + RSVP ----------------------------------------------------------
@@ -650,6 +909,10 @@ async def create_event(body: EventCreate, me: str = Depends(current_user)):
         # sqlite doesn't enforce FKs here, so existence is checked in app code
         if not db.execute("SELECT 1 FROM users WHERE username = ?", (name,)).fetchone():
             raise HTTPException(400, "no such user")
+        if not talked_both_ways(me, name):
+            raise HTTPException(400, f"you can only invite contacts — {name} hasn't replied to you yet")
+    # a block ends the contact, but dropping them silently avoids confirming the block
+    invitees = [n for n in invitees if not blocked_between(me, n)]
     cur = db.execute("INSERT INTO events(title, event_date, creator) VALUES (?,?,?)",
                      (title, body.event_date, me))
     event_id = cur.lastrowid
@@ -795,8 +1058,13 @@ class Question(BaseModel):
 async def collect_answer(q: str, opts) -> str:
     parts = []
     async for msg in query(prompt=q, options=opts):
-        if isinstance(msg, AssistantMessage):
+        # a failed turn (expired login, usage limit...) arrives as a synthetic assistant
+        # message whose TEXT is the error — never let that reach the user as an answer
+        if isinstance(msg, AssistantMessage) and not getattr(msg, "error", None):
             parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
+        elif isinstance(msg, ResultMessage) and msg.is_error:
+            # the SDK's own exception only says "error result: success"; this has the reason
+            raise ClaudeSDKError(msg.result or msg.subtype)
     return " ".join(" ".join(parts).split())
 
 
@@ -865,7 +1133,7 @@ async def ask_assistant(body: Question, me: str = Depends(current_user)):
         raise HTTPException(503, "assistant unavailable")
     try:
         answer = await asyncio.wait_for(run_assistant(q, me), timeout=ASSISTANT_TIMEOUT)
-    except (asyncio.TimeoutError, ClaudeSDKError, OSError) as e:
+    except Exception as e:     # the SDK also raises bare Exception, which used to escape as a 500
         # the caller learns nothing about the SDK, the CLI or the login state — but the
         # operator does: a timeout and a dead CLI are the same 503 from the outside
         cause = e.__cause__ or e.__context__      # the SDK's own message is often empty
@@ -884,6 +1152,9 @@ async def ask_assistant(body: Question, me: str = Depends(current_user)):
 # {"type":"message","to","text",         {"type":"message", id, sender, recipient,
 #  "media_id"?,"alt"?}                    text, ts, status, media_id, alt}
 #                                       (echo of your own send, same shape)
+#
+# Send {"group": id} instead of "to" for a group; everything a member receives then
+# carries "group_id". Groups get no delivered/read/typing events.
 #
 # `media_id` references a row uploaded via POST /media; `alt` is the sender's
 # locally-computed scene description for it. The bytes never cross this socket.
@@ -913,15 +1184,18 @@ async def broadcast_presence(user: str, is_online: bool):
     """Tell everyone else that `user` just came online or went offline."""
     # snapshot with list() — the dict can change while we await mid-loop
     for name, ws in list(online.items()):
-        if name != user:
-            await ws.send_json({"type": "presence", "user": user, "online": is_online})
+        if name != user and not blocked_between(name, user):
+            try:
+                await ws.send_json({"type": "presence", "user": user, "online": is_online})
+            except Exception:
+                pass  # that socket is mid-close; its own finally cleans it up. Keep telling the rest.
 
 
 async def notify(user: str, kind: str, actor: str, body: str):
     """Record something the user missed while away, then try to reach them off-tab
     via web push. Skipped entirely when they're connected: a live socket means they
     already saw it (as a message + toast), so it isn't a "missed" notification."""
-    if user in online:
+    if user in online or has_rel(user, actor, "mute") or has_rel(user, actor, "block"):
         return
     body = body[:200]
     db.execute(
@@ -945,14 +1219,17 @@ async def chat_ws(ws: WebSocket, token: str = ""):
 
     # anything addressed to me while I was away has now arrived — tell its senders.
     # Read the senders *before* the UPDATE, or the WHERE clause matches nothing.
+    # A blocked sender's ticks stay put: a flip to delivered would tell them I'm online.
     senders = [r["sender"] for r in db.execute(
-        "SELECT DISTINCT sender FROM messages WHERE recipient = ? AND status = 'sent'",
+        "SELECT DISTINCT sender FROM messages WHERE recipient = ? AND status = 'sent' AND hidden = 0",
         (username,),
-    )]
-    db.execute(
-        "UPDATE messages SET status = 'delivered' WHERE recipient = ? AND status = 'sent'",
-        (username,),
-    )
+    ) if not blocked_between(username, r["sender"])]
+    for s in senders:
+        db.execute(
+            "UPDATE messages SET status = 'delivered'"
+            " WHERE recipient = ? AND sender = ? AND status = 'sent' AND hidden = 0",
+            (username, s),
+        )
     db.commit()
     for s in senders:
         await push(s, {"type": "delivered", "by": username})
@@ -964,59 +1241,101 @@ async def chat_ws(ws: WebSocket, token: str = ""):
             event = await ws.receive_json()
 
             if event.get("type") == "message":
-                to, text = event["to"], event.get("text") or ""
+                text = event.get("text") or ""
+                gid, to = event.get("group"), None
+                if gid is not None:
+                    if not isinstance(gid, int) or not db.execute(
+                            "SELECT 1 FROM group_members WHERE group_id = ? AND username = ?",
+                            (gid, username)).fetchone():
+                        continue      # not a member (or not a group): nothing to send to
+                    hidden = False
+                else:
+                    to = event.get("to")
+                    if not isinstance(to, str) or not to or has_rel(username, to, "block"):
+                        continue      # unblock first; the client hides the composer
+                    hidden = has_rel(to, username, "block")
                 media_id, alt = event.get("media_id"), (event.get("alt") or None)
-                media_w = media_h = None
+                media_w = media_h = media_mime = media_duration = None
                 if media_id:
                     # you may only attach your OWN upload — otherwise anyone who saw an
                     # id could re-send someone else's photo under their own name
-                    m = db.execute("SELECT width, height FROM media WHERE id = ? AND owner = ?",
+                    m = db.execute("SELECT width, height, mime, duration FROM media WHERE id = ? AND owner = ?",
                                    (media_id, username)).fetchone()
                     if not m:
                         continue
                     media_w, media_h = m["width"], m["height"]
+                    media_mime, media_duration = m["mime"], m["duration"]
                     if alt:
                         alt = alt[:500]
                 elif not text.strip():
                     continue          # a message with neither text nor a photo isn't one
-                status = "delivered" if to in online else "sent"
+                status = "delivered" if to in online and not hidden else "sent"
                 ts = time.time()
                 cur = db.execute(
-                    "INSERT INTO messages(sender, recipient, text, ts, status, media_id, alt)"
-                    " VALUES(?,?,?,?,?,?,?)",
-                    (username, to, text, ts, status, media_id, alt),
+                    "INSERT INTO messages(sender, recipient, text, ts, status, media_id, alt, hidden, group_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (username, to or "", text, ts, status, media_id, alt, int(hidden), gid),
                 )
                 db.commit()
                 out = {"type": "message", "id": cur.lastrowid, "sender": username,
-                       "recipient": to, "text": text, "ts": ts, "status": status,
-                       "media_id": media_id, "alt": alt,
-                       "media_w": media_w, "media_h": media_h, "reactions": []}
-                await push(to, out)
+                       "recipient": to or "", "group_id": gid, "text": text, "ts": ts, "status": status,
+                       "media_id": media_id, "alt": alt, "media_w": media_w, "media_h": media_h,
+                       "media_mime": media_mime, "media_duration": media_duration, "reactions": []}
                 # feed the recipient's pane — a photo shows up as its description
-                await notify(to, "message", username, preview(text, media_id, alt))
+                shown = preview(text, media_id, alt, media_mime)
+                if gid is not None:
+                    gname = db.execute("SELECT name FROM chat_groups WHERE id = ?", (gid,)).fetchone()["name"]
+                    for member in members_of(gid):
+                        if member != username:
+                            await push(member, out)
+                            await notify(member, "message", username, f"{gname}: {shown}")
+                else:
+                    if not hidden:    # the sender's echo is identical either way
+                        await push(to, out)
+                    await notify(to, "message", username, shown)
                 # echo carries the real id + status; client_id reconciles the optimistic bubble
                 await ws.send_json({**out, "client_id": event.get("client_id")})
+
+            elif event.get("type") == "read" and event.get("group") is not None:
+                db.execute("UPDATE group_members SET last_read = ? WHERE group_id = ? AND username = ?",
+                           (newest_message_id(), event["group"], username))
+                db.commit()
 
             elif event.get("type") == "read":
                 other = event["from"]      # whose messages I just read
                 db.execute(
                     """UPDATE messages SET status = 'read'
-                       WHERE sender = ? AND recipient = ? AND status != 'read'""",
+                       WHERE sender = ? AND recipient = ? AND status != 'read' AND hidden = 0""",
                     (other, username),
                 )
                 db.commit()
-                await push(other, {"type": "read", "by": username})
+                if not blocked_between(username, other):
+                    await push(other, {"type": "read", "by": username})
 
             elif event.get("type") == "typing":
                 # pure forward, no db: only means anything to whoever's watching now
-                await push(event["to"], {"type": "typing", "from": username})
+                to = event.get("to")
+                if isinstance(to, str) and not blocked_between(username, to):
+                    await push(to, {"type": "typing", "from": username})
 
             elif event.get("type") == "reaction":
                 mid, emoji = event["message_id"], event["emoji"]
-                msg = db.execute("SELECT sender, recipient, text, media_id, alt FROM messages WHERE id = ?",
-                                 (mid,)).fetchone()
-                if not msg or username not in (msg["sender"], msg["recipient"]):
-                    continue  # only participants may react
+                msg = db.execute(
+                    """SELECT m.sender, m.recipient, m.group_id, m.text, m.media_id, m.alt, md.mime
+                       FROM messages m LEFT JOIN media md ON md.id = m.media_id WHERE m.id = ?""",
+                    (mid,)).fetchone()
+                if not msg:
+                    continue
+                if msg["group_id"] is not None:
+                    audience = members_of(msg["group_id"])
+                    if username not in audience:
+                        continue  # only members may react
+                else:
+                    audience = list({msg["sender"], msg["recipient"]})
+                    if username not in audience:
+                        continue  # only participants may react
+                    if blocked_between(msg["sender"], msg["recipient"]):
+                        continue
                 existing = db.execute(
                     "SELECT emoji FROM reactions WHERE message_id = ? AND username = ?", (mid, username)).fetchone()
                 removed = bool(existing and existing["emoji"] == emoji)
@@ -1025,13 +1344,12 @@ async def chat_ws(ws: WebSocket, token: str = ""):
                 else:                                # new or switched emoji
                     db.execute("INSERT OR REPLACE INTO reactions VALUES (?,?,?)", (mid, username, emoji))
                 db.commit()
-                shown = preview(msg["text"], msg["media_id"], msg["alt"])
+                shown = preview(msg["text"], msg["media_id"], msg["alt"], msg["mime"])
                 out = {"type": "reaction", "message_id": mid, "emoji": emoji, "by": username,
-                       "removed": removed, "message_text": shown,
+                       "removed": removed, "message_text": shown, "group_id": msg["group_id"],
                        "message_sender": msg["sender"], "message_recipient": msg["recipient"]}
-                await push(msg["sender"], out)
-                if msg["recipient"] != msg["sender"]:
-                    await push(msg["recipient"], out)
+                for name in audience:
+                    await push(name, out)
                 # only the message's owner cares that someone reacted, and only when
                 # a reaction is added (not toggled off) by somebody other than them
                 if not removed and username != msg["sender"]:
