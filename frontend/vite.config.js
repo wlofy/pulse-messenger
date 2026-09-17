@@ -8,6 +8,12 @@ export default defineConfig({
   server: {
     proxy: {
       '/login': backend,
+      '/signup': backend,
+      '/logout': backend,
+      '/exists': backend,
+      '/profile': backend,
+      '/contacts': backend,
+      '/groups': backend,
       '/users': backend,
       '/chats': backend,
       '/messages': backend,

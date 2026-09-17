@@ -5,10 +5,22 @@ import Auth from './Auth.jsx'
 import Avatar from './Avatar.jsx'
 import Chat from './Chat.jsx'
 import Events from './Events.jsx'
+import { GroupInfo, NewGroup } from './Groups.jsx'
 import ImageViewer from './ImageViewer.jsx'
 import Notifications from './Notifications.jsx'
 import ProfilePanel from './Profile.jsx'
 import Sidebar from './Sidebar.jsx'
+
+// A DM is keyed by the other person's username, a group by its numeric id. typeof
+// tells them apart, and a number can never collide with somebody's username.
+const keyOf = (chat) => chat.group_id ?? chat.username
+const isGroup = (key) => typeof key === 'number'
+const loadMessages = (key) => (isGroup(key) ? api.groupMessages(key) : api.messages(key))
+const readEvent = (key) => (isGroup(key) ? { type: 'read', group: key } : { type: 'read', from: key })
+// one line for toasts and OS notifications (the sidebar's comes from the server)
+const previewOf = (m) =>
+  m.media_mime?.startsWith('audio/') ? '🎤 Voice message'
+    : m.media_id ? `📷 ${m.text || m.alt || 'Photo'}` : m.text
 
 export default function App() {
   // Theme is a property of the DEVICE, not the session, so it lives in localStorage
@@ -101,8 +113,8 @@ export default function App() {
 
 function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange, onLogout }) {
   const [chats, setChats] = useState([])
-  const [active, setActive] = useState(null)        // username of the open chat
-  const [activeUser, setActiveUser] = useState(null) // their profile (works pre-history too)
+  const [active, setActive] = useState(null)        // key of the open chat: username, or group id
+  const [activeUser, setActiveUser] = useState(null) // their profile / the group (works pre-history too)
   const [messages, setMessages] = useState([])
   const [typing, setTyping] = useState({})           // username -> true
   const [toasts, setToasts] = useState([])
@@ -112,6 +124,8 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
   const [notifOpen, setNotifOpen] = useState(false)
   const [eventsOpen, setEventsOpen] = useState(false)
   const [viewing, setViewing] = useState(null)          // message whose photo is open
+  const [newGroupOpen, setNewGroupOpen] = useState(false)
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false)
 
   const socketRef = useRef(null)
   const activeRef = useRef(null)
@@ -144,9 +158,9 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
   // it was hidden) and clear its unread badge.
   useEffect(() => {
     const onVisible = () => {
-      if (document.hidden || !activeRef.current) return
-      socketRef.current?.send({ type: 'read', from: activeRef.current })
-      setChats((cs) => cs.map((c) => (c.username === activeRef.current ? { ...c, unread: 0 } : c)))
+      if (document.hidden || activeRef.current == null) return
+      socketRef.current?.send(readEvent(activeRef.current))
+      setChats((cs) => cs.map((c) => (keyOf(c) === activeRef.current ? { ...c, unread: 0 } : c)))
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
@@ -164,17 +178,17 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
   // a click deep-links to the chat (same handler as web push); falls back to the
   // plain Notification constructor otherwise. When the tab is fully CLOSED this
   // path can't run — that's what server-side web push covers.
-  const notify = useCallback((sender, text) => {
+  const notify = useCallback((title, text, actor = title) => {
     if (!document.hidden) return
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
-    const opts = { body: text, tag: sender, renotify: true, data: { actor: sender } }
+    const opts = { body: text, tag: actor, renotify: true, data: { actor } }
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker
         .getRegistration()
-        .then((reg) => (reg ? reg.showNotification(sender, opts) : new Notification(sender, opts)))
+        .then((reg) => (reg ? reg.showNotification(title, opts) : new Notification(title, opts)))
         .catch(() => {})
     } else {
-      try { new Notification(sender, opts) } catch { /* unsupported */ }
+      try { new Notification(title, opts) } catch { /* unsupported */ }
     }
   }, [])
 
@@ -198,7 +212,7 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
           loadChats()
           loadNotifs() // catch up on anything that landed while we were disconnected
           const a = activeRef.current
-          if (a) api.messages(a).then(setMessages).catch(() => {})
+          if (a != null) loadMessages(a).then(setMessages).catch(() => {})
         }
       },
       onEvent: (ev) => {
@@ -211,18 +225,22 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
             const { type, ...msg } = ev
             setMessages((ms) => ms.map((m) => (m.client_id === ev.client_id ? { ...m, ...msg } : m)))
           } else {
-            setTypingFor(ev.sender, false)
-            if (activeRef.current === ev.sender) {
+            const key = ev.group_id ?? ev.sender
+            const chat = chatsRef.current.find((c) => keyOf(c) === key)
+            const title = ev.group_id ? chat?.name || 'Group' : ev.sender
+            const body = ev.group_id ? `${ev.sender}: ${previewOf(ev)}` : previewOf(ev)
+            if (!ev.group_id) setTypingFor(ev.sender, false)
+            if (activeRef.current === key) {
               const { type, ...msg } = ev
               setMessages((ms) => [...ms, msg])
               // if I'm on another tab, don't mark read behind my back — alert me instead;
               // the visibilitychange handler sends the read receipt when I come back
-              if (document.hidden) notify(ev.sender, ev.text)
-              else socketRef.current?.send({ type: 'read', from: ev.sender })
-            } else {
-              const from = chatsRef.current.find((c) => c.username === ev.sender) || { username: ev.sender }
-              pushToast({ kind: 'message', user: from, title: ev.sender, body: ev.text })
-              notify(ev.sender, ev.text)
+              if (document.hidden && !chat?.muted) notify(title, body, ev.sender)
+              else socketRef.current?.send(readEvent(key))
+            } else if (!chat?.muted) {
+              const user = ev.group_id ? { username: title } : chat || { username: ev.sender }
+              pushToast({ kind: 'message', key, user, title, body })
+              notify(title, body, ev.sender)
             }
           }
           loadChats()
@@ -241,8 +259,19 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
         } else if (ev.type === 'presence') {
           setActiveUser((u) => (u && u.username === ev.user ? { ...u, online: ev.online } : u))
           loadChats()
+        } else if (ev.type === 'groups') {
+          // created, joined, left or someone was added: refetch, and close a group I'm no longer in
+          api.chats().then((cs) => {
+            setChats(cs)
+            if (isGroup(activeRef.current) && !cs.some((c) => c.group_id === activeRef.current)) {
+              setActive(null)
+              setActiveUser(null)
+              setGroupInfoOpen(false)
+            }
+          }).catch(() => {})
         } else if (ev.type === 'reaction') {
-          const chatWith = ev.message_sender === me.username ? ev.message_recipient : ev.message_sender
+          const chatWith = ev.group_id ??
+            (ev.message_sender === me.username ? ev.message_recipient : ev.message_sender)
           if (activeRef.current === chatWith)
             setMessages((ms) => ms.map((m) => {
               if (m.id !== ev.message_id) return m
@@ -254,8 +283,9 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
           if (ev.by !== me.username && !ev.removed && ev.message_sender === me.username &&
               (activeRef.current !== chatWith || document.hidden)) {
             const from = chatsRef.current.find((c) => c.username === ev.by) || { username: ev.by }
-            pushToast({ kind: 'reaction', user: from, emoji: ev.emoji, title: ev.by, body: ev.message_text })
-            notify(`${ev.by} reacted ${ev.emoji}`, ev.message_text)
+            if (from.muted) return
+            pushToast({ kind: 'reaction', key: chatWith, user: from, emoji: ev.emoji, title: ev.by, body: ev.message_text })
+            notify(`${ev.by} reacted ${ev.emoji}`, ev.message_text, ev.by)
           }
         }
       },
@@ -270,13 +300,20 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
     document.title = totalUnread ? `(${totalUnread}) Pulse` : 'Pulse'
   }, [totalUnread])
 
-  const openChat = useCallback((user) => {
-    setActive(user.username)
-    setActiveUser(user)
+  const openChat = useCallback((chat) => {
+    const key = keyOf(chat)
+    setActive(key)
+    setActiveUser(chat)
     setMessages([])
-    api.messages(user.username).then(setMessages).catch(() => {})
-    socketRef.current?.send({ type: 'read', from: user.username })
-    setChats((cs) => cs.map((c) => (c.username === user.username ? { ...c, unread: 0 } : c)))
+    setGroupInfoOpen(false)
+    loadMessages(key).then(setMessages).catch(() => {})
+    // a deep link or toast may hand us just {username}; the header and composer need blocked/muted
+    if (!isGroup(key))
+      api.profile(key)
+        .then((p) => setActiveUser((u) => (u?.username === p.username ? { ...u, ...p } : u)))
+        .catch(() => {})
+    socketRef.current?.send(readEvent(key))
+    setChats((cs) => cs.map((c) => (keyOf(c) === key ? { ...c, unread: 0 } : c)))
   }, [])
 
   const unreadNotifs = notifs.reduce((a, n) => a + (n.read ? 0 : 1), 0)
@@ -313,43 +350,60 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
     return () => navigator.serviceWorker?.removeEventListener('message', onSwMessage)
   }, [openChatByName])
 
-  // `photo` is a staged attachment from the composer: {dataUrl, width, height, alt}.
-  // The bubble appears immediately with the local preview; the upload happens over
-  // HTTP (megabytes don't belong on the chat socket) and only then does the message
-  // go out, carrying just the id and the description.
-  const sendMessage = useCallback(async (text, photo) => {
+  // `photo` is a staged attachment from the composer: {dataUrl, width, height, alt};
+  // `voice` a finished recording: {dataUrl, duration, mime}. The bubble appears
+  // immediately with the local copy; the upload happens over HTTP (megabytes don't
+  // belong on the chat socket) and only then does the message go out, carrying the id.
+  const sendMessage = useCallback(async (text, photo, voice) => {
     const to = activeRef.current
-    if (!to) return
+    if (to == null) return
+    const group = isGroup(to)
+    const media = photo || voice
     const client_id = crypto.randomUUID()
     setMessages((ms) => [...ms, {
-      client_id, sender: me.username, recipient: to, text,
+      client_id, sender: me.username, recipient: group ? '' : to, group_id: group ? to : null, text,
       ts: Date.now() / 1000, status: 'pending', reactions: [],
-      localUrl: photo?.dataUrl || null, alt: photo?.alt || null,
+      localUrl: media?.dataUrl || null, alt: photo?.alt || null,
       media_w: photo?.width, media_h: photo?.height,
+      media_mime: voice?.mime, media_duration: voice?.duration,
     }])
 
     let media_id = null
-    if (photo) {
+    if (media) {
       try {
-        media_id = (await api.uploadMedia(photo.dataUrl, photo.width, photo.height)).id
+        media_id = (await (voice
+          ? api.uploadVoice(voice.dataUrl, voice.duration)
+          : api.uploadMedia(photo.dataUrl, photo.width, photo.height))).id
       } catch (e) {
-        // Leave the bubble in place marked "Not sent" — silently dropping a photo
+        // Leave the bubble in place marked "Not sent" — silently dropping something
         // someone chose to send is the one outcome that's worse than an error.
         setMessages((ms) => ms.map((m) => (m.client_id === client_id ? { ...m, status: 'failed' } : m)))
-        pushToast({ kind: 'message', user: { username: to }, title: 'Photo not sent', body: e.message })
+        pushToast({ kind: 'message', key: to, user: { username: String(to) },
+                    title: voice ? 'Voice message not sent' : 'Photo not sent', body: e.message })
         return
       }
     }
-    socketRef.current?.send({ type: 'message', to, text, client_id, media_id, alt: photo?.alt || null })
+    socketRef.current?.send({ type: 'message', ...(group ? { group: to } : { to }),
+                              text, client_id, media_id, alt: photo?.alt || null })
   }, [me.username, pushToast])
 
+  // Block / mute someone. The open chat's header, composer and the sidebar all
+  // read the flags, so fold them into both places they live.
+  const setRelation = useCallback(async (username, kind, on) => {
+    const flags = await api.setRelation(username, kind, on)
+    setActiveUser((u) => (u && u.username === username ? { ...u, ...flags } : u))
+    setChats((cs) => cs.map((c) => (c.username === username ? { ...c, ...flags } : c)))
+    loadChats() // presence and previews change with a block
+    return flags
+  }, [loadChats])
+
   // Freshest view of the open chat's profile (presence/avatar updates ride on chats).
-  const displayUser = active
-    ? { ...activeUser, ...(chats.find((c) => c.username === active) || {}) }
+  const displayUser = active != null
+    ? { ...activeUser, ...(chats.find((c) => keyOf(c) === active) || {}) }
     : null
 
   return (
-    <div className={`app ${active ? 'has-active' : ''}`}>
+    <div className={`app ${active != null ? 'has-active' : ''}`}>
       <Sidebar
         me={me}
         chats={chats}
@@ -361,6 +415,7 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
         onOpenProfile={setProfileView}
         onOpenNotifications={openNotifications}
         onOpenEvents={() => setEventsOpen(true)}
+        onNewGroup={() => setNewGroupOpen(true)}
         theme={theme}
         onToggleTheme={onToggleTheme}
         onLogout={onLogout}
@@ -369,12 +424,15 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
         me={me}
         user={displayUser}
         messages={messages}
-        isTyping={!!typing[active]}
+        isTyping={!isGroup(active) && !!typing[active]}
         onSend={sendMessage}
-        onTyping={() => socketRef.current?.send({ type: 'typing', to: activeRef.current })}
+        onTyping={() => !isGroup(activeRef.current) &&
+          socketRef.current?.send({ type: 'typing', to: activeRef.current })}
         onReact={(message_id, emoji) => socketRef.current?.send({ type: 'reaction', message_id, emoji })}
         onOpenProfile={setProfileView}
         onOpenImage={setViewing}
+        onOpenGroup={() => setGroupInfoOpen(true)}
+        onUnblock={() => setRelation(active, 'block', false).catch(() => {})}
         onBack={() => { setActive(null); setActiveUser(null) }}
       />
 
@@ -387,6 +445,32 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
       )}
 
       {eventsOpen && <Events me={me} onClose={() => setEventsOpen(false)} />}
+
+      {newGroupOpen && (
+        <NewGroup
+          onClose={() => setNewGroupOpen(false)}
+          onCreated={(g) => {
+            setNewGroupOpen(false)
+            setChats((cs) => [g, ...cs.filter((c) => c.group_id !== g.group_id)])
+            openChat(g)
+          }}
+        />
+      )}
+
+      {groupInfoOpen && isGroup(active) && displayUser?.members && (
+        <GroupInfo
+          me={me}
+          group={displayUser}
+          onClose={() => setGroupInfoOpen(false)}
+          onChanged={(g) => setChats((cs) => cs.map((c) => (c.group_id === g.group_id ? g : c)))}
+          onLeft={() => {
+            setGroupInfoOpen(false)
+            setActive(null)
+            setActiveUser(null)
+            loadChats()
+          }}
+        />
+      )}
 
       <Assistant />
 
@@ -406,6 +490,7 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
           accent={accent}
           onAccentChange={onAccentChange}
           onClose={() => setProfileView(null)}
+          onRelation={setRelation}
           onMeChange={(user) => { onMeChange(user); loadChats() }}
         />
       )}
@@ -416,8 +501,8 @@ function ChatApp({ me, theme, onToggleTheme, accent, onAccentChange, onMeChange,
             key={t.id}
             className={`toast ${t.leaving ? 'leaving' : ''}`}
             onClick={() => {
-              const user = chatsRef.current.find((c) => c.username === t.user.username) || t.user
-              openChat(user)
+              const chat = chatsRef.current.find((c) => keyOf(c) === t.key)
+              if (chat || !isGroup(t.key)) openChat(chat || t.user)
             }}
           >
             <Avatar user={t.user} size={36} />

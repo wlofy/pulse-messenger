@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import Avatar from './Avatar.jsx'
 import {
-  BellIcon, CalendarIcon, LogOutIcon, MessageIcon, MoonIcon, PulseLogo, SearchIcon, SunIcon,
-  Ticks, XIcon,
+  BellIcon, BellOffIcon, CalendarIcon, LogOutIcon, MessageIcon, MoonIcon, PulseLogo, SearchIcon, SunIcon,
+  Ticks, UsersIcon, XIcon,
 } from './icons.jsx'
 
 function timeLabel(ts) {
@@ -17,7 +17,7 @@ function timeLabel(ts) {
 }
 
 export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNotifs,
-                                  onOpen, onOpenProfile, onOpenNotifications, onOpenEvents,
+                                  onOpen, onOpenProfile, onOpenNotifications, onOpenEvents, onNewGroup,
                                   theme, onToggleTheme, onLogout }) {
   const [q, setQ] = useState('')
   const [found, setFound] = useState([])
@@ -33,7 +33,7 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
   const searching = !!q.trim()
   const needle = q.trim().toLowerCase()
   const chatMatches = searching
-    ? chats.filter((c) => c.username.toLowerCase().includes(needle))
+    ? chats.filter((c) => [c.username, c.name].some((s) => s?.toLowerCase().includes(needle)))
     : chats
   const chatNames = new Set(chats.map((c) => c.username))
   const newPeople = found.filter((u) => !chatNames.has(u.username))
@@ -66,6 +66,9 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
             {wsStatus === 'connected' ? 'online' : 'reconnecting…'}
           </span>
         </div>
+        <button className="icon-btn" title="New group" aria-label="New group" onClick={onNewGroup}>
+          <UsersIcon size={18} />
+        </button>
         <button className="icon-btn" title="Events" aria-label="Events" onClick={onOpenEvents}>
           <CalendarIcon size={18} />
         </button>
@@ -119,20 +122,29 @@ export default function Sidebar({ me, chats, active, typing, wsStatus, unreadNot
 
         {chatMatches.map((c, i) => (
           <button
-            key={c.username}
-            className={`chat-item ${active === c.username ? 'active' : ''}`}
+            key={c.group_id ? `group-${c.group_id}` : c.username}
+            className={`chat-item ${active === (c.group_id ?? c.username) ? 'active' : ''}`}
             style={{ '--i': i }}
             onClick={() => open(c)}
           >
-            <Avatar user={c} size={46} online={c.online} />
+            {c.group_id
+              ? <Avatar user={{ username: c.name }} size={46} />
+              : <Avatar user={c} size={46} online={c.online} />}
             <div className="chat-item-body">
               <div className="chat-item-top">
                 <span className="chat-item-name">{c.name || c.username}</span>
+                {c.muted && <BellOffIcon size={13} className="muted-icon" role="img" aria-hidden={false} aria-label="muted" />}
                 <span className={`chat-item-time ${c.unread ? 'unread' : ''}`}>{timeLabel(c.last_ts)}</span>
               </div>
               <div className="chat-item-bottom">
-                {typing[c.username] ? (
+                {!c.group_id && typing[c.username] ? (
                   <span className="chat-item-typing">typing…</span>
+                ) : c.group_id ? (
+                  <span className="chat-item-preview">
+                    {c.last_sender
+                      ? `${c.last_sender === me.username ? 'You' : c.last_sender}: ${c.last_text}`
+                      : `${c.members.length} members`}
+                  </span>
                 ) : (
                   <span className="chat-item-preview">
                     {c.last_sender === me.username && <Ticks status={c.last_status} />}

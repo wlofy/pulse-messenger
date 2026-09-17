@@ -218,7 +218,7 @@ function NewEvent({ day, onCancel, onCreated, onError }) {
   const first = useRef(null)
 
   useEffect(() => {
-    api.users().then(setPeople).catch(() => {})
+    api.contacts().then(setPeople).catch(() => {})  // only contacts can be invited
     first.current?.focus()
   }, [])
 
@@ -252,9 +252,11 @@ function NewEvent({ day, onCancel, onCreated, onError }) {
         onChange={(e) => setWhen(e.target.value)}
         aria-label="When"
       />
-      {people.length > 0 && (
+      <span className="event-form-label">Invite</span>
+      {people.length === 0 ? (
+        <p className="group-note">You can invite people once they've replied to your messages.</p>
+      ) : (
         <>
-          <span className="event-form-label">Invite</span>
           <div className="event-picker">
             {people.map((u) => (
               <button

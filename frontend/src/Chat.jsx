@@ -1,11 +1,64 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { mediaUrl } from './api.js'
 import Avatar from './Avatar.jsx'
-import { ArrowLeftIcon, ImageIcon, PulseLogo, ScanEyeIcon, SendIcon, SmilePlusIcon, Ticks, XIcon } from './icons.jsx'
+import {
+  ArrowLeftIcon, BellOffIcon, ImageIcon, MicIcon, PauseIcon, PlayIcon, PulseLogo, ScanEyeIcon, SendIcon,
+  SmilePlusIcon, Ticks, XIcon,
+} from './icons.jsx'
 import { altTextFor, bestReadyEngine, detectIn, prepareImage } from './vision.js'
 
 const QUICK_REACTIONS = ['❤️', '😂', '👍', '😮', '😢', '🔥']
 const PAGE = 40 // messages rendered at once; older ones load as you scroll up
+const MAX_VOICE_SECONDS = 300 // the server rejects anything longer
+
+const fmtDuration = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+
+// A custom player rather than <audio controls>: MediaRecorder's webm reports an
+// Infinity duration in Chrome, so the native scrubber is broken. The recorder's
+// own clock (sent with the upload) is the length we trust.
+function VoiceNote({ src, duration }) {
+  const audio = useRef()
+  const [playing, setPlaying] = useState(false)
+  const [at, setAt] = useState(0)
+  const total = duration || 0
+
+  const toggle = () => {
+    const a = audio.current
+    if (a.paused) a.play().catch(() => setPlaying(false))
+    else a.pause()
+  }
+
+  return (
+    <div className="voice-note">
+      <button type="button" className="voice-play" onClick={toggle}
+              aria-label={playing ? 'Pause voice message' : 'Play voice message'}>
+        {playing ? <PauseIcon size={15} /> : <PlayIcon size={15} />}
+      </button>
+      <input
+        type="range"
+        className="voice-seek"
+        min="0"
+        max={total || 1}
+        step="0.1"
+        value={Math.min(at, total || 1)}
+        style={{ '--pct': `${total ? Math.min(at / total, 1) * 100 : 0}%` }}
+        onChange={(e) => { audio.current.currentTime = +e.target.value; setAt(+e.target.value) }}
+        aria-label="Seek"
+        aria-valuetext={fmtDuration(at)}
+      />
+      <span className="voice-time">{fmtDuration(playing || at ? at : total)}</span>
+      <audio
+        ref={audio}
+        src={src}
+        preload="none"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => { setPlaying(false); setAt(0) }}
+        onTimeUpdate={(e) => setAt(e.currentTarget.currentTime)}
+      />
+    </div>
+  )
+}
 
 const fmtTime = (ts) =>
   new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -26,10 +79,11 @@ function TypingDots() {
   )
 }
 
-function Bubble({ msg, mine, tail, picker, onPickerToggle, onReact, onOpenImage }) {
-  // Optimistic sends carry `localUrl` — the photo is on screen before the upload
-  // finishes, so the bubble never shows an empty box.
-  const photo = msg.media_id || msg.localUrl
+function Bubble({ msg, mine, tail, author, picker, onPickerToggle, onReact, onOpenImage }) {
+  // Optimistic sends carry `localUrl` — the photo or recording is on screen before
+  // the upload finishes, so the bubble never shows an empty box.
+  const voice = msg.media_mime?.startsWith('audio/')
+  const photo = !voice && (msg.media_id || msg.localUrl)
   return (
     <div className={`row ${mine ? 'mine' : 'theirs'} ${tail ? 'tail' : ''} ${msg.reactions.length ? 'has-reactions' : ''}`}>
       <div className="bubble-wrap">
@@ -42,6 +96,8 @@ function Bubble({ msg, mine, tail, picker, onPickerToggle, onReact, onOpenImage 
         </button>
 
         <div className={`bubble ${photo ? 'has-photo' : ''}`}>
+          {author && <span className="bubble-author">{author}</span>}
+          {voice && <VoiceNote src={msg.localUrl || mediaUrl(msg.media_id)} duration={msg.media_duration} />}
           {photo && (
             <button
               className="bubble-photo"
@@ -67,7 +123,8 @@ function Bubble({ msg, mine, tail, picker, onPickerToggle, onReact, onOpenImage 
             {fmtTime(msg.ts)}
             {mine && (msg.status === 'failed'
               ? <span className="bubble-failed">Not sent</span>
-              : <Ticks status={msg.status} />)}
+              // groups have no delivery receipts, only the "still sending" clock
+              : (!msg.group_id || msg.status === 'pending') && <Ticks status={msg.status} />)}
           </span>
 
           {msg.reactions.length > 0 && (
@@ -99,7 +156,9 @@ function Bubble({ msg, mine, tail, picker, onPickerToggle, onReact, onOpenImage 
   )
 }
 
-export default function Chat({ me, user, messages, isTyping, onSend, onTyping, onReact, onOpenProfile, onOpenImage, onBack }) {
+export default function Chat({ me, user, messages, isTyping, onSend, onTyping, onReact, onOpenProfile, onOpenImage,
+                               onOpenGroup, onUnblock, onBack }) {
+  const chatKey = user ? (user.group_id ?? user.username) : null
   const [draft, setDraft] = useState('')
   const [picker, setPicker] = useState(null) // message id with open reaction picker
   const [visible, setVisible] = useState(PAGE) // how many trailing messages we render
@@ -117,7 +176,7 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
     if (keepScroll.current != null) return // a "load earlier" render owns the scroll
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [user?.username, count, isTyping])
+  }, [chatKey, count, isTyping])
 
   // After revealing older messages, hold the viewport on the same message instead
   // of jumping — the content above grew, so offset scrollTop by that growth.
@@ -143,7 +202,58 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
     setAttachment(null) // a staged photo belongs to the chat it was staged in
     setVisible(PAGE) // fresh window per conversation
     inputRef.current?.focus()
-  }, [user?.username])
+    return () => stopRecording(false) // a half-recorded note belongs to the chat it started in
+  }, [chatKey])
+
+  // --- voice messages ---------------------------------------------------------
+  const [recording, setRecording] = useState(null) // {secs} while the mic is live
+  const recorder = useRef(null)
+  const canRecord = typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
+
+  // send=false discards. Either way the mic is released in onstop.
+  function stopRecording(send) {
+    const r = recorder.current
+    if (!r) return
+    recorder.current = null
+    r.shouldSend = send
+    clearInterval(r.timer)
+    if (r.state !== 'inactive') r.stop()
+    setRecording(null)
+  }
+
+  const startRecording = async () => {
+    if (recorder.current) return
+    let stream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch {
+      setAttachment({ error: 'Microphone access is blocked — allow it in your browser to send voice messages.' })
+      return
+    }
+    // 32 kbps opus is clear for speech and keeps 5 minutes around 1.2 MB, well under the upload cap
+    const r = new MediaRecorder(stream, { audioBitsPerSecond: 32000 })
+    const chunks = []
+    const started = Date.now()
+    r.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
+    r.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop()) // turns off the browser's recording indicator
+      const duration = Math.min((Date.now() - started) / 1000, MAX_VOICE_SECONDS)
+      if (!r.shouldSend || duration < 0.5) return // a stray tap, not a message
+      const blob = new Blob(chunks, { type: r.mimeType || 'audio/webm' })
+      const reader = new FileReader()
+      reader.onload = () => onSend('', null, { dataUrl: reader.result, duration, mime: blob.type.split(';')[0] })
+      reader.readAsDataURL(blob)
+    }
+    r.timer = setInterval(() => {
+      const secs = (Date.now() - started) / 1000
+      if (secs >= MAX_VOICE_SECONDS) stopRecording(true)
+      else setRecording({ secs })
+    }, 250)
+    recorder.current = r
+    setAttachment(null)
+    r.start()
+    setRecording({ secs: 0 })
+  }
 
   // Stage a photo: decode and downscale it, then describe it locally. The
   // description is the ONLY thing here that will leave the device, and only
@@ -244,17 +354,28 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
         </button>
         <button
           className="avatar-btn"
-          onClick={() => onOpenProfile(user.username)}
-          aria-label={`View ${user.username}'s profile`}
-          title="View profile"
+          onClick={() => (user.group_id ? onOpenGroup() : onOpenProfile(user.username))}
+          aria-label={user.group_id ? `${user.name} group info` : `View ${user.username}'s profile`}
+          title={user.group_id ? 'Group info' : 'View profile'}
         >
-          <Avatar user={user} size={40} online={user.online ?? false} />
+          {user.group_id
+            ? <Avatar user={{ username: user.name }} size={40} />
+            : <Avatar user={user} size={40} online={user.online ?? false} />}
         </button>
         <div className="chat-header-info">
-          <strong>{user.name || user.username}</strong>
-          <span className={`chat-header-sub ${isTyping ? 'typing' : user.online ? 'online' : ''}`}>
-            {isTyping ? (<>typing<TypingDots /></>) : user.online ? 'online' : 'offline'}
-          </span>
+          <strong>
+            {user.name || user.username}
+            {user.muted && <BellOffIcon size={13} className="muted-icon" role="img" aria-hidden={false} aria-label="muted" />}
+          </strong>
+          {user.group_id ? (
+            <button type="button" className="chat-header-sub chat-header-members" onClick={onOpenGroup}>
+              {user.members?.join(', ')}
+            </button>
+          ) : (
+            <span className={`chat-header-sub ${isTyping ? 'typing' : user.online ? 'online' : ''}`}>
+              {isTyping ? (<>typing<TypingDots /></>) : user.online ? 'online' : 'offline'}
+            </span>
+          )}
         </div>
       </header>
 
@@ -269,6 +390,8 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
             const mine = m.sender === me.username
             const newDay = !prev || dayLabel(prev.ts) !== dayLabel(m.ts)
             const tail = !next || next.sender !== m.sender || next.ts - m.ts > 180
+            // in a group, name whoever starts each run of messages
+            const author = user.group_id && !mine && (newDay || prev.sender !== m.sender) ? m.sender : null
             return (
               <div key={m.client_id || m.id}>
                 {newDay && (
@@ -278,6 +401,7 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
                   msg={m}
                   mine={mine}
                   tail={tail}
+                  author={author}
                   picker={picker === m.id}
                   onPickerToggle={(id) => setPicker(picker === id ? null : id)}
                   onReact={(id, emoji) => { setPicker(null); onReact(id, emoji) }}
@@ -295,6 +419,12 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
         </div>
       </div>
 
+      {user.blocked ? (
+        <div className="composer-blocked">
+          <span>You blocked {user.name || user.username}. They can't message you.</span>
+          <button type="button" onClick={onUnblock}>Unblock</button>
+        </div>
+      ) : (<>
       {attachment && (
         <div className="attach-strip">
           {attachment.error ? (
@@ -336,6 +466,22 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
       )}
 
       <form className="composer" onSubmit={submit}>
+        {recording ? (
+          <>
+            <button type="button" className="icon-btn" onClick={() => stopRecording(false)}
+                    aria-label="Discard voice message" title="Discard">
+              <XIcon size={18} />
+            </button>
+            <div className="rec-status" role="status">
+              <span className="rec-dot" aria-hidden="true" />
+              Recording {fmtDuration(recording.secs)}
+            </div>
+            <button type="button" className="send-btn" onClick={() => stopRecording(true)}
+                    aria-label="Send voice message">
+              <SendIcon size={19} />
+            </button>
+          </>
+        ) : (<>
         <button
           type="button"
           className="icon-btn attach-btn"
@@ -361,10 +507,19 @@ export default function Chat({ me, user, messages, isTyping, onSend, onTyping, o
           aria-label="Message"
           maxLength={2000}
         />
-        <button className="send-btn" disabled={!draft.trim() && !attachment?.dataUrl} aria-label="Send">
-          <SendIcon size={19} />
-        </button>
+        {canRecord && !draft.trim() && !attachment?.dataUrl ? (
+          <button type="button" className="send-btn" onClick={startRecording}
+                  aria-label="Record a voice message" title="Record a voice message">
+            <MicIcon size={19} />
+          </button>
+        ) : (
+          <button className="send-btn" disabled={!draft.trim() && !attachment?.dataUrl} aria-label="Send">
+            <SendIcon size={19} />
+          </button>
+        )}
+        </>)}
       </form>
+      </>)}
     </main>
   )
 }

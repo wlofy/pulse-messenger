@@ -167,6 +167,36 @@ export const CheckIcon = (p) => (
   </I>
 )
 
+export const UsersIcon = (p) => (
+  <I {...p}>
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  </I>
+)
+
+export const MicIcon = (p) => (
+  <I {...p}>
+    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <path d="M12 19v3" />
+  </I>
+)
+
+export const PlayIcon = (p) => (
+  <I {...p} fill="currentColor">
+    <path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5Z" />
+  </I>
+)
+
+export const PauseIcon = (p) => (
+  <I {...p} fill="currentColor">
+    <rect x="6" y="4" width="4" height="16" rx="1" />
+    <rect x="14" y="4" width="4" height="16" rx="1" />
+  </I>
+)
+
 export const PlusIcon = (p) => (
   <I {...p}>
     <path d="M5 12h14" />

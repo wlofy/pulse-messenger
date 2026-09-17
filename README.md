@@ -10,6 +10,17 @@ from heavy frameworks.
 - **Real-time messaging** over a single WebSocket per session (auto-reconnect with backoff)
 - **Delivery + read receipts**, typing indicators, and live online/offline presence
 - **Message reactions** (emoji, toggle on/off)
+- **Contacts + group chats** — someone becomes a contact once they reply to your DM;
+  there's no request/accept step, answering *is* accepting. Groups are built from your
+  contacts, and any member can add their own contacts. New members don't see history
+  from before they joined. Groups track unread counts but skip per-person read receipts.
+- **Voice messages** — tap the mic when the message box is empty, up to 5 minutes. Recorded
+  in the browser at speech bitrate, uploaded like a photo, and played back with a custom
+  player (Chrome reports MediaRecorder recordings as infinitely long, so the recorder's own
+  clock is stored with the upload).
+- **Block + mute** — mute silences every notification from someone. Block also hides their
+  messages (they stay at one tick on their side, with no error), their typing, reactions and
+  presence in both directions, and keeps them out of your events.
 - **Photo messages with on-device vision** — attach, paste or drop an image and an
   object detector runs *in your browser* to write a description of it. That description
   becomes the image's `alt` text, the notification body and the sidebar preview; it's
@@ -22,9 +33,9 @@ from heavy frameworks.
   viewer's own hardware.
 - **Events + RSVPs** — a month calendar with event chips shown right in the day cells,
   so you see what's on without opening anything. Click a day for detail, to RSVP, or to
-  add an event on that date. Invitations reuse the existing notification + web-push
-  pipeline, so an invite reaches you with the tab closed. An event is visible **only** to
-  its creator and the people invited to it.
+  add an event on that date. Only your contacts can be invited. Invitations reuse the
+  existing notification + web-push pipeline, so an invite reaches you with the tab closed.
+  An event is visible **only** to its creator and the people invited to it.
 - **Pulse AI** — a floating assistant that answers plain-English questions about your
   events ("what's on next week?", "who's coming to the BBQ?"). It runs on the Claude Code
   login already on your machine, so there's **no API key and no per-token billing**.
@@ -63,11 +74,11 @@ from heavy frameworks.
 python -m venv .venv
 .venv/Scripts/activate          # Windows;  source .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-uvicorn main:app --app-dir app --port 8001 --reload
+uvicorn main:app --app-dir app --port 8000 --reload
 ```
 
 The server also serves the built frontend from `frontend/dist`, so once you've built
-the frontend (below) the whole app is available at http://127.0.0.1:8001.
+the frontend (below) the whole app is available at http://127.0.0.1:8000.
 
 Pulse AI additionally needs the **Claude Code CLI installed and logged in** on this
 machine (`claude` — the SDK ships it). Everything else runs without it; if it's missing,
@@ -93,6 +104,8 @@ Each test spins up a real uvicorn server on its own database:
 .venv/Scripts/python.exe app/test_ratelimit.py
 .venv/Scripts/python.exe app/test_media.py
 .venv/Scripts/python.exe app/test_events.py
+.venv/Scripts/python.exe app/test_block.py
+.venv/Scripts/python.exe app/test_groups.py
 ```
 
 `test_events.py` runs entirely offline — it calls no model, so it's safe on every build.
